@@ -30,21 +30,36 @@ emoji_map = {
 }
 
 
-async def sendAudioMessage(conn, audios, text, text_index=0):
+async def sendAudioMessage(conn, audios, text, text_index=0, motion_data_to_use=None):
     # 发送句子开始消息
     if text is not None:
         emotion = analyze_emotion(text)
         emoji = emoji_map.get(emotion, "🙂")  # 默认使用笑脸
-        await conn.websocket.send(
-            json.dumps(
-                {
-                    "type": "llm",
-                    "text": emoji,
-                    "emotion": emotion,
-                    "session_id": conn.session_id,
-                }
-            )
-        )
+        # 先构建基础消息字典
+        llm_message_data = {
+            "type": "llm",
+            "text": emoji,
+            "emotion": emotion,
+            "session_id": conn.session_id,
+        }
+        # 使用传递过来的特定 motion_data_to_use
+        if motion_data_to_use:
+            try:
+                # 尝试解析 motion_data_to_use，如果它已经是JSON字符串
+                expandmotion_data = json.loads(motion_data_to_use)
+                llm_message_data["motion_data"] = expandmotion_data
+            except json.JSONDecodeError:
+                 # 如果解析失败，可能它已经是dict或者其他格式，直接赋值
+                conn.logger.bind(tag=TAG).warning(f"motion_data_to_use 无法解析为JSON: {motion_data_to_use}, 将直接使用")
+                llm_message_data["motion_data"] = motion_data_to_use
+            except TypeError: # Handle if motion_data_to_use is not a string (e.g. already a dict)
+                conn.logger.bind(tag=TAG).info(f"motion_data_to_use 不是字符串，直接使用: {motion_data_to_use}")
+                llm_message_data["motion_data"] = motion_data_to_use
+
+
+        # 发送最终构建的消息
+        conn.logger.bind(tag=TAG).info(f"发送LLM消息到客户端: {json.dumps(llm_message_data, ensure_ascii=False)}")
+        await conn.websocket.send(json.dumps(llm_message_data))
 
     if text_index == conn.tts_first_text_index:
         conn.logger.bind(tag=TAG).info(f"发送第一段语音: {text}")
@@ -119,6 +134,9 @@ async def send_tts_message(conn, state, text=None):
             await sendAudio(conn, audios)
         # 清除服务端讲话状态
         conn.clearSpeakStatus()
+        # 在 TTS 结束后清除暂存的 expandmotion，为下一轮做准备
+        if hasattr(conn, 'pending_expandmotion'):
+            conn.pending_expandmotion = None
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))

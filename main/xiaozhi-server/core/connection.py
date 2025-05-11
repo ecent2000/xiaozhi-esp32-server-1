@@ -8,6 +8,7 @@ import time
 import queue
 import asyncio
 import traceback
+import re
 
 import threading
 import websockets
@@ -90,6 +91,9 @@ class ConnectionHandler:
         # 上报线程
         self.tts_report_queue = queue.Queue()
         self.tts_report_thread = None
+
+        # 用于暂存从LLM回复前缀提取的motion/expression JSON字符串
+        self.pending_expandmotion = None
 
         # 依赖的组件
         self.vad = None
@@ -515,31 +519,79 @@ class ConnectionHandler:
             # 找到分割点则处理
             if last_punct_pos != -1:
                 segment_text_raw = current_text[: last_punct_pos + 1]
-                segment_text = get_string_no_punctuation_or_emoji(segment_text_raw)
-                if segment_text:
-                    # 强制设置空字符，测试TTS出错返回语音的健壮性
-                    # if text_index % 2 == 0:
-                    #     segment_text = " "
-                    text_index += 1
-                    self.recode_first_last_text(segment_text, text_index)
-                    future = self.executor.submit(
-                        self.speak_and_play, segment_text, text_index
-                    )
-                    self.tts_queue.put((future, text_index))
-                    processed_chars += len(segment_text_raw)  # 更新已处理字符位置
+                
+                parts = re.split(r'(\{.*?\})', segment_text_raw)
+                accumulated_text_for_tts = ""
+                for part_str in parts:
+                    if not part_str: continue
+                    is_json_candidate = part_str.strip().startswith('{') and '}' in part_str
+                    if is_json_candidate:
+                        try:
+                            json_data = json.loads(part_str)
+                            if accumulated_text_for_tts.strip():
+                                final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                                if final_text_to_speak:
+                                    text_index += 1
+                                    self.recode_first_last_text(final_text_to_speak, text_index)
+                                    future = self.executor.submit(
+                                        self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                                    )
+                                    self.tts_queue.put((future, text_index))
+                                accumulated_text_for_tts = ""
+                            self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
+                            self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (re.split segment): {self.pending_expandmotion}")
+                        except (ValueError, json.JSONDecodeError):
+                            accumulated_text_for_tts += part_str
+                    else:
+                        accumulated_text_for_tts += part_str
+                if accumulated_text_for_tts.strip():
+                    final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                    if final_text_to_speak:
+                        text_index += 1
+                        self.recode_first_last_text(final_text_to_speak, text_index)
+                        future = self.executor.submit(
+                            self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                        )
+                        self.tts_queue.put((future, text_index))
+                processed_chars += len(segment_text_raw)
 
         # 处理最后剩余的文本
         full_text = "".join(response_message)
-        remaining_text = full_text[processed_chars:]
-        if remaining_text:
-            segment_text = get_string_no_punctuation_or_emoji(remaining_text)
-            if segment_text:
-                text_index += 1
-                self.recode_first_last_text(segment_text, text_index)
-                future = self.executor.submit(
-                    self.speak_and_play, segment_text, text_index
-                )
-                self.tts_queue.put((future, text_index))
+        remaining_text_raw = full_text[processed_chars:]
+        if remaining_text_raw:
+            parts = re.split(r'(\{.*?\})', remaining_text_raw)
+            accumulated_text_for_tts = ""
+            for part_str in parts:
+                if not part_str: continue
+                is_json_candidate = part_str.strip().startswith('{') and '}' in part_str
+                if is_json_candidate:
+                    try:
+                        json_data = json.loads(part_str)
+                        if accumulated_text_for_tts.strip():
+                            final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                            if final_text_to_speak:
+                                text_index += 1
+                                self.recode_first_last_text(final_text_to_speak, text_index)
+                                future = self.executor.submit(
+                                    self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                                )
+                                self.tts_queue.put((future, text_index))
+                            accumulated_text_for_tts = ""
+                        self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
+                        self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (re.split remaining): {self.pending_expandmotion}")
+                    except (ValueError, json.JSONDecodeError):
+                        accumulated_text_for_tts += part_str
+                else:
+                    accumulated_text_for_tts += part_str
+            if accumulated_text_for_tts.strip():
+                final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                if final_text_to_speak:
+                    text_index += 1
+                    self.recode_first_last_text(final_text_to_speak, text_index)
+                    future = self.executor.submit(
+                        self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                    )
+                    self.tts_queue.put((future, text_index))
 
         self.llm_finish_task = True
         self.dialogue.put(Message(role="assistant", content="".join(response_message)))
@@ -648,18 +700,41 @@ class ConnectionHandler:
                     # 找到分割点则处理
                     if last_punct_pos != -1:
                         segment_text_raw = current_text[: last_punct_pos + 1]
-                        segment_text = get_string_no_punctuation_or_emoji(
-                            segment_text_raw
-                        )
-                        if segment_text:
-                            text_index += 1
-                            self.recode_first_last_text(segment_text, text_index)
-                            future = self.executor.submit(
-                                self.speak_and_play, segment_text, text_index
-                            )
-                            self.tts_queue.put((future, text_index))
-                            # 更新已处理字符位置
-                            processed_chars += len(segment_text_raw)
+                        
+                        parts = re.split(r'(\{.*?\})', segment_text_raw)
+                        accumulated_text_for_tts = ""
+                        for part_str in parts:
+                            if not part_str: continue
+                            is_json_candidate = part_str.strip().startswith('{') and '}' in part_str
+                            if is_json_candidate:
+                                try:
+                                    json_data = json.loads(part_str)
+                                    if accumulated_text_for_tts.strip():
+                                        final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                                        if final_text_to_speak:
+                                            text_index += 1
+                                            self.recode_first_last_text(final_text_to_speak, text_index)
+                                            future = self.executor.submit(
+                                                self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                                            )
+                                            self.tts_queue.put((future, text_index))
+                                        accumulated_text_for_tts = ""
+                                    self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
+                                    self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (fc re.split segment): {self.pending_expandmotion}")
+                                except (ValueError, json.JSONDecodeError):
+                                    accumulated_text_for_tts += part_str
+                            else:
+                                accumulated_text_for_tts += part_str
+                        if accumulated_text_for_tts.strip():
+                            final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                            if final_text_to_speak:
+                                text_index += 1
+                                self.recode_first_last_text(final_text_to_speak, text_index)
+                                future = self.executor.submit(
+                                    self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                                )
+                                self.tts_queue.put((future, text_index))
+                        processed_chars += len(segment_text_raw)
 
         # 处理function call
         if tool_call_flag:
@@ -707,22 +782,50 @@ class ConnectionHandler:
 
         # 处理最后剩余的文本
         full_text = "".join(response_message)
-        remaining_text = full_text[processed_chars:]
-        if remaining_text:
-            segment_text = get_string_no_punctuation_or_emoji(remaining_text)
-            if segment_text:
-                text_index += 1
-                self.recode_first_last_text(segment_text, text_index)
-                future = self.executor.submit(
-                    self.speak_and_play, segment_text, text_index
-                )
-                self.tts_queue.put((future, text_index))
+        remaining_text_raw = full_text[processed_chars:]
+        if remaining_text_raw:
+            parts = re.split(r'(\{.*?\})', remaining_text_raw)
+            accumulated_text_for_tts = ""
+            for part_str in parts:
+                if not part_str: continue
+                is_json_candidate = part_str.strip().startswith('{') and '}' in part_str
+                if is_json_candidate:
+                    try:
+                        json_data = json.loads(part_str)
+                        if accumulated_text_for_tts.strip():
+                            final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                            if final_text_to_speak:
+                                text_index += 1
+                                self.recode_first_last_text(final_text_to_speak, text_index)
+                                future = self.executor.submit(
+                                    self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                                )
+                                self.tts_queue.put((future, text_index))
+                            accumulated_text_for_tts = ""
+                        self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
+                        self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (fc re.split remaining): {self.pending_expandmotion}")
+                    except (ValueError, json.JSONDecodeError):
+                        accumulated_text_for_tts += part_str
+                else:
+                    accumulated_text_for_tts += part_str
+            if accumulated_text_for_tts.strip():
+                final_text_to_speak = get_string_no_punctuation_or_emoji(accumulated_text_for_tts)
+                if final_text_to_speak:
+                    text_index += 1
+                    self.recode_first_last_text(final_text_to_speak, text_index)
+                    future = self.executor.submit(
+                        self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
+                    )
+                    self.tts_queue.put((future, text_index))
 
         # 存储对话内容
         if len(response_message) > 0:
+            complete_response = "".join(response_message)
             self.dialogue.put(
-                Message(role="assistant", content="".join(response_message))
+                Message(role="assistant", content=complete_response)
             )
+            self.logger.bind(tag=TAG).info(f"LLM 完整回复 (function_call): {complete_response}")
+
 
         self.llm_finish_task = True
         self.logger.bind(tag=TAG).debug(
@@ -777,7 +880,7 @@ class ConnectionHandler:
         if result.action == Action.RESPONSE:  # 直接回复前端
             text = result.response
             self.recode_first_last_text(text, text_index)
-            future = self.executor.submit(self.speak_and_play, text, text_index)
+            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion) # Added self.pending_expandmotion
             self.tts_queue.put((future, text_index))
             self.dialogue.put(Message(role="assistant", content=text))
         elif result.action == Action.REQLLM:  # 调用函数后再请求llm生成回复
@@ -816,7 +919,7 @@ class ConnectionHandler:
         elif result.action == Action.NOTFOUND or result.action == Action.ERROR:
             text = result.result
             self.recode_first_last_text(text, text_index)
-            future = self.executor.submit(self.speak_and_play, text, text_index)
+            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion) # Added self.pending_expandmotion
             self.tts_queue.put((future, text_index))
             self.dialogue.put(Message(role="assistant", content=text))
         else:
@@ -830,7 +933,7 @@ class ConnectionHandler:
                     item = self.tts_queue.get(timeout=1)
                     if item is None:
                         continue
-                    future, text_index = item  # 解包获取 Future 和 text_index
+                    future, text_index_of_segment = item  # 解包获取 Future 和 text_index_of_segment
                 except queue.Empty:
                     if self.stop_event.is_set():
                         break
@@ -839,17 +942,19 @@ class ConnectionHandler:
                     continue
                 text = None
                 opus_datas, tts_file = [], None
+                captured_motion_json = None # Initialize
                 try:
                     self.logger.bind(tag=TAG).debug("正在处理TTS任务...")
                     tts_timeout = int(self.config.get("tts_timeout", 10))
-                    tts_file, text, _ = future.result(timeout=tts_timeout)
+                    # speak_and_play now returns 4 items: tts_file, text_content, original_text_index, captured_motion_json
+                    tts_file, text, _, captured_motion_json = future.result(timeout=tts_timeout)
                     if text is None or len(text) <= 0:
                         self.logger.bind(tag=TAG).error(
-                            f"TTS出错：{text_index}: tts text is empty"
+                            f"TTS出错：{text_index_of_segment}: tts text is empty"
                         )
                     elif tts_file is None:
                         self.logger.bind(tag=TAG).error(
-                            f"TTS出错： file is empty: {text_index}: {text}"
+                            f"TTS出错： file is empty: {text_index_of_segment}: {text}"
                         )
                     else:
                         self.logger.bind(tag=TAG).debug(
@@ -872,7 +977,7 @@ class ConnectionHandler:
                     self.logger.bind(tag=TAG).error(f"TTS出错: {e}")
                 if not self.client_abort:
                     # 如果没有中途打断就发送语音
-                    self.audio_play_queue.put((audio_datas, text, text_index))
+                    self.audio_play_queue.put((audio_datas, text, text_index_of_segment, captured_motion_json))
                 if (
                     self.tts.delete_audio_file
                     and tts_file is not None
@@ -901,15 +1006,16 @@ class ConnectionHandler:
     def _audio_play_priority_thread(self):
         while not self.stop_event.is_set():
             text = None
+            motion_for_this_audio = None
             try:
                 try:
-                    audio_datas, text, text_index = self.audio_play_queue.get(timeout=1)
+                    audio_datas, text, text_index, motion_for_this_audio = self.audio_play_queue.get(timeout=1)
                 except queue.Empty:
                     if self.stop_event.is_set():
                         break
                     continue
                 future = asyncio.run_coroutine_threadsafe(
-                    sendAudioMessage(self, audio_datas, text, text_index), self.loop
+                    sendAudioMessage(self, audio_datas, text, text_index, motion_for_this_audio), self.loop
                 )
                 future.result()
             except Exception as e:
@@ -940,22 +1046,48 @@ class ConnectionHandler:
             except queue.Empty:
                 continue
             except Exception as e:
-                self.logger.bind(tag=TAG).error(f"TTS上报工作线程异常: {e}")
+                    self.logger.bind(tag=TAG).error(f"TTS上报工作线程异常: {e}")
 
         self.logger.bind(tag=TAG).info("TTS上报线程已退出")
 
-    def speak_and_play(self, text, text_index=0):
+    def speak_and_play(self, text, text_index=0, current_motion_json=None):
         if text is None or len(text) <= 0:
             self.logger.bind(tag=TAG).info(f"无需tts转换，query为空，{text}")
-            return None, text, text_index
-        tts_file = self.tts.to_tts(text)
+            return None, text, text_index, current_motion_json
+
+        text_for_tts = text 
+        original_text_for_return = text 
+
+        # The JSON stripping logic here is now mostly redundant as `text` should be pre-processed by re.split.
+        # However, keeping it might act as a fallback or handle unforeseen cases if raw text with JSON is passed.
+        if isinstance(text_for_tts, str) and text_for_tts.strip().startswith('{') and '}' in text_for_tts:
+             try:
+                 end_json_index = text_for_tts.index('}') + 1
+                 extracted_text = text_for_tts[end_json_index:]
+                 if extracted_text.strip():
+                     text_for_tts = extracted_text
+                     self.logger.bind(tag=TAG).debug(f"speak_and_play: (Fallback) Stripped JSON, TTS input: '{text_for_tts}'")
+                 else:
+                     self.logger.bind(tag=TAG).debug(f"speak_and_play: (Fallback) JSON detected, but no text after it. Original: '{original_text_for_return}'")
+                     text_for_tts = "" 
+             except ValueError:
+                 self.logger.bind(tag=TAG).warning(f"speak_and_play: (Fallback) Error finding '}}' in potential JSON, using original: '{text_for_tts}'")
+                 pass 
+        
+        if not text_for_tts.strip():
+             self.logger.bind(tag=TAG).info(f"speak_and_play: Skipping TTS for empty or JSON-only text. Original: '{original_text_for_return}'")
+             return None, original_text_for_return, text_index, current_motion_json
+
+        tts_file = self.tts.to_tts(text_for_tts)
+
         if tts_file is None:
-            self.logger.bind(tag=TAG).error(f"tts转换失败，{text}")
-            return None, text, text_index
+            self.logger.bind(tag=TAG).error(f"tts转换失败，text for tts: '{text_for_tts}'")
+            return None, original_text_for_return, text_index, current_motion_json
+
         self.logger.bind(tag=TAG).debug(f"TTS 文件生成完毕: {tts_file}")
         if self.max_output_size > 0:
-            add_device_output(self.headers.get("device-id"), len(text))
-        return tts_file, text, text_index
+            add_device_output(self.headers.get("device-id"), len(original_text_for_return))
+        return tts_file, original_text_for_return, text_index, current_motion_json
 
     def clearSpeakStatus(self):
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
