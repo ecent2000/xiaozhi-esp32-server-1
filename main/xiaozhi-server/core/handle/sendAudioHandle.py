@@ -134,9 +134,6 @@ async def send_tts_message(conn, state, text=None):
             await sendAudio(conn, audios)
         # 清除服务端讲话状态
         conn.clearSpeakStatus()
-        # 在 TTS 结束后清除暂存的 expandmotion，为下一轮做准备
-        if hasattr(conn, 'pending_expandmotion'):
-            conn.pending_expandmotion = None
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))

@@ -537,6 +537,7 @@ class ConnectionHandler:
                                         self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                                     )
                                     self.tts_queue.put((future, text_index))
+                                    self.pending_expandmotion = None
                                 accumulated_text_for_tts = ""
                             self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
                             self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (re.split segment): {self.pending_expandmotion}")
@@ -553,6 +554,7 @@ class ConnectionHandler:
                             self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                         )
                         self.tts_queue.put((future, text_index))
+                        self.pending_expandmotion = None
                 processed_chars += len(segment_text_raw)
 
         # 处理最后剩余的文本
@@ -576,6 +578,7 @@ class ConnectionHandler:
                                     self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                                 )
                                 self.tts_queue.put((future, text_index))
+                                self.pending_expandmotion = None
                             accumulated_text_for_tts = ""
                         self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
                         self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (re.split remaining): {self.pending_expandmotion}")
@@ -592,6 +595,7 @@ class ConnectionHandler:
                         self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                     )
                     self.tts_queue.put((future, text_index))
+                    self.pending_expandmotion = None
 
         self.llm_finish_task = True
         self.dialogue.put(Message(role="assistant", content="".join(response_message)))
@@ -718,6 +722,7 @@ class ConnectionHandler:
                                                 self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                                             )
                                             self.tts_queue.put((future, text_index))
+                                            self.pending_expandmotion = None
                                         accumulated_text_for_tts = ""
                                     self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
                                     self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (fc re.split segment): {self.pending_expandmotion}")
@@ -734,6 +739,7 @@ class ConnectionHandler:
                                     self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                                 )
                                 self.tts_queue.put((future, text_index))
+                                self.pending_expandmotion = None
                         processed_chars += len(segment_text_raw)
 
         # 处理function call
@@ -801,6 +807,7 @@ class ConnectionHandler:
                                     self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                                 )
                                 self.tts_queue.put((future, text_index))
+                                self.pending_expandmotion = None
                             accumulated_text_for_tts = ""
                         self.pending_expandmotion = json.dumps(json_data, ensure_ascii=False)
                         self.logger.bind(tag=TAG).debug(f"暂存 expandmotion (fc re.split remaining): {self.pending_expandmotion}")
@@ -817,6 +824,7 @@ class ConnectionHandler:
                         self.speak_and_play, final_text_to_speak, text_index, self.pending_expandmotion
                     )
                     self.tts_queue.put((future, text_index))
+                    self.pending_expandmotion = None
 
         # 存储对话内容
         if len(response_message) > 0:
@@ -880,8 +888,9 @@ class ConnectionHandler:
         if result.action == Action.RESPONSE:  # 直接回复前端
             text = result.response
             self.recode_first_last_text(text, text_index)
-            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion) # Added self.pending_expandmotion
+            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion)
             self.tts_queue.put((future, text_index))
+            self.pending_expandmotion = None
             self.dialogue.put(Message(role="assistant", content=text))
         elif result.action == Action.REQLLM:  # 调用函数后再请求llm生成回复
             text = result.result
@@ -919,8 +928,9 @@ class ConnectionHandler:
         elif result.action == Action.NOTFOUND or result.action == Action.ERROR:
             text = result.result
             self.recode_first_last_text(text, text_index)
-            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion) # Added self.pending_expandmotion
+            future = self.executor.submit(self.speak_and_play, text, text_index, self.pending_expandmotion)
             self.tts_queue.put((future, text_index))
+            self.pending_expandmotion = None
             self.dialogue.put(Message(role="assistant", content=text))
         else:
             pass
