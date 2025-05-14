@@ -223,7 +223,8 @@ async def play_local_music(conn, specific_file=None):
         if tts_file is not None and os.path.exists(tts_file):
             conn.tts_last_text_index = 1
             opus_packets, _ = conn.tts.audio_to_opus_data(tts_file)
-            conn.audio_play_queue.put((opus_packets, None, 0))
+            # 添加第四个元素 None (motion_for_this_audio)
+            conn.audio_play_queue.put((opus_packets, None, 0, None))
             os.remove(tts_file)
 
         conn.llm_finish_task = True
@@ -232,7 +233,8 @@ async def play_local_music(conn, specific_file=None):
             opus_packets, _ = p3.decode_opus_from_file(music_path)
         else:
             opus_packets, _ = conn.tts.audio_to_opus_data(music_path)
-        conn.audio_play_queue.put((opus_packets, None, conn.tts_last_text_index))
+        # 添加第四个元素 None (motion_for_this_audio)
+        conn.audio_play_queue.put((opus_packets, None, conn.tts_last_text_index, None))
 
     except Exception as e:
         conn.logger.bind(tag=TAG).error(f"播放音乐失败: {str(e)}")
