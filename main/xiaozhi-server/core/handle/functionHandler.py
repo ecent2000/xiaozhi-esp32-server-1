@@ -57,6 +57,10 @@ class FunctionHandler:
                     f"自动注册已发现的插件函数: {name}"
                 )
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
+=======
+                
+>>>>>>> Stashed changes
 =======
                 
 >>>>>>> Stashed changes
