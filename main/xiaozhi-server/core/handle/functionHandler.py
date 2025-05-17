@@ -56,6 +56,10 @@ class FunctionHandler:
                 self.conn.logger.bind(tag=TAG, session_id=self.conn.session_id).info(
                     f"自动注册已发现的插件函数: {name}"
                 )
+<<<<<<< Updated upstream
+=======
+                
+>>>>>>> Stashed changes
     def register_nessary_functions(self):
         """注册必要的函数"""
         self.function_registry.register_function("handle_exit_intent")
