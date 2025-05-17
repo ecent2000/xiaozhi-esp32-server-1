@@ -13,6 +13,7 @@ class FunctionHandler:
         self.function_registry = FunctionRegistry()
         self.register_nessary_functions()
         self.register_config_functions()
+        self._register_all_discovered_functions()
         self.functions_desc = self.function_registry.get_all_function_desc()
         func_names = self.current_support_functions()
         self.modify_plugin_loader_des(func_names)
@@ -56,6 +57,7 @@ class FunctionHandler:
                 self.conn.logger.bind(tag=TAG, session_id=self.conn.session_id).info(
                     f"自动注册已发现的插件函数: {name}"
                 )
+                
     def register_nessary_functions(self):
         """注册必要的函数"""
         self.function_registry.register_function("handle_exit_intent")
