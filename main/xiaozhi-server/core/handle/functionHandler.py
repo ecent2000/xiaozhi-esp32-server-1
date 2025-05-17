@@ -1,6 +1,6 @@
 from config.logger import setup_logging
 import json
-from plugins_func.register import FunctionRegistry, ActionResponse, Action, ToolType
+from plugins_func.register import FunctionRegistry, ActionResponse, Action, ToolType, all_function_registry
 from plugins_func.functions.hass_init import append_devices_to_prompt
 
 TAG = __name__
