@@ -1,6 +1,6 @@
 from config.logger import setup_logging
 import json
-from plugins_func.register import FunctionRegistry, ActionResponse, Action, ToolType
+from plugins_func.register import FunctionRegistry, ActionResponse, Action, ToolType, all_function_registry
 from plugins_func.functions.hass_init import append_devices_to_prompt
 
 TAG = __name__
@@ -11,6 +11,7 @@ class FunctionHandler:
         self.conn = conn
         self.config = conn.config
         self.function_registry = FunctionRegistry()
+        self._register_all_discovered_functions()
         self.register_nessary_functions()
         self.register_config_functions()
         self.functions_desc = self.function_registry.get_all_function_desc()
@@ -47,6 +48,15 @@ class FunctionHandler:
     def get_functions(self):
         """获取功能调用配置"""
         return self.functions_desc
+
+    def _register_all_discovered_functions(self):
+        """注册所有通过 @register_function 装饰器发现的函数"""
+        for name, func_item in all_function_registry.items():
+            if not self.function_registry.get_function(name): # 避免重复注册
+                self.function_registry.register_function(name)
+                self.conn.logger.bind(tag=TAG, session_id=self.conn.session_id).info(
+                    f"自动注册已发现的插件函数: {name}"
+                )
 
     def register_nessary_functions(self):
         """注册必要的函数"""
