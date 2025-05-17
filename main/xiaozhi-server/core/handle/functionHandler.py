@@ -47,7 +47,15 @@ class FunctionHandler:
     def get_functions(self):
         """获取功能调用配置"""
         return self.functions_desc
-
+    
+    def _register_all_discovered_functions(self):
+        """注册所有通过 @register_function 装饰器发现的函数"""
+        for name, func_item in all_function_registry.items():
+            if not self.function_registry.get_function(name): # 避免重复注册
+                self.function_registry.register_function(name)
+                self.conn.logger.bind(tag=TAG, session_id=self.conn.session_id).info(
+                    f"自动注册已发现的插件函数: {name}"
+                )
     def register_nessary_functions(self):
         """注册必要的函数"""
         self.function_registry.register_function("handle_exit_intent")
