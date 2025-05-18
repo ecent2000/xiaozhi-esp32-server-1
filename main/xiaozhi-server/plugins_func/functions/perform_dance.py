@@ -1,5 +1,7 @@
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from config.logger import setup_logging
+import asyncio
+import json
 
 TAG = __name__
 logger = setup_logging()
@@ -29,6 +31,36 @@ def perform_dance(conn, dance_name: str):
     实际场景中，这里可能会调用客户端接口执行相应的动作。
     """
     try:
+        # 构建并发送 LLM 格式的消息给客户端
+        if hasattr(conn, 'loop') and conn.loop.is_running() and hasattr(conn, 'websocket') and hasattr(conn, 'session_id'):
+            async def _send_dance_feedback_to_client(current_conn, current_dance_name: str):
+                try:
+                    session_id = current_conn.session_id
+                    llm_message_data = {
+                        "type": "llm",
+                        "text": "💃",  # 跳舞的表情符号
+                        "emotion": "happy",
+                        "session_id": session_id,
+                        "motion_data": {
+                            "motion": "跳舞",
+                            "dance_name": current_dance_name,
+                            "expression": "happy" 
+                        }
+                    }
+                    message_json = json.dumps(llm_message_data, ensure_ascii=False)
+                    logger.bind(tag=TAG).info(f"发送舞蹈LLM消息到客户端: {message_json}")
+                    await current_conn.websocket.send(message_json)
+                except Exception as e_async:
+                    logger.bind(tag=TAG).error(f"发送舞蹈LLM消息时异步出错: {e_async}")
+
+            # 在事件循环中安全地运行异步任务
+            asyncio.run_coroutine_threadsafe(
+                _send_dance_feedback_to_client(conn, dance_name), 
+                conn.loop
+            )
+        else:
+            logger.bind(tag=TAG).warning("无法发送舞蹈LLM消息：conn 对象缺少 loop, websocket 或 session_id 属性，或者 loop 未运行。")
+
         message = f"已完成 {dance_name} 舞蹈"
         logger.bind(tag=TAG).info(message)
         
