@@ -13,17 +13,8 @@ TAG = __name__
 async def handleAudioMessage(conn, audio):
     if conn.vad is None:
         return
-
-    if time.time() < conn.block_asr_until:
-        conn.logger.bind(tag=TAG).debug(f"ASR被阻塞，直到 {conn.block_asr_until:.2f}，当前时间: {time.time():.2f}")
-        # 在阻塞期间，可以选择丢弃累积的音频，以防止阻塞结束后处理旧的、可能不需要的音频片段
-        if conn.asr_audio: # 仅在有累积音频时清空并记录
-            conn.logger.bind(tag=TAG).debug(f"ASR阻塞期间，清空已累积的 {len(conn.asr_audio)} 帧音频。")
-            conn.asr_audio.clear()
-        return
-
     if not conn.asr_server_receive:
-        conn.logger.bind(tag=TAG).debug(f"前期数据处理中 (asr_server_receive=False)，暂停接收")
+        conn.logger.bind(tag=TAG).debug(f"前期数据处理中，暂停接收")
         return
     if conn.client_listen_mode == "auto" or conn.client_listen_mode == "realtime":
         have_voice = conn.vad.is_vad(conn, audio)
@@ -43,35 +34,21 @@ async def handleAudioMessage(conn, audio):
     # 如果本段有声音，且已经停止了
     if conn.client_voice_stop:
         conn.client_abort = False
-        # conn.asr_server_receive = False # 由 block_asr_until 控制，这里不再直接关闭
-        
+        conn.asr_server_receive = False
         # 音频太短了，无法识别
         if len(conn.asr_audio) < 15:
-            # conn.asr_server_receive = True # 由 block_asr_until 控制
-            if time.time() >= conn.block_asr_until:
-                conn.asr_server_receive = True
-            else:
-                conn.logger.bind(tag=TAG).debug(f"ASR(音频短)尝试恢复，但仍被阻塞直到 {conn.block_asr_until:.2f}")
+            conn.asr_server_receive = True
         else:
-            # 在调用ASR之前，也应该关闭asr_server_receive，防止重入，但要确保之后能正确恢复
-            original_asr_receive_state = conn.asr_server_receive
-            conn.asr_server_receive = False
-            
             text, _ = await conn.asr.speech_to_text(conn.asr_audio, conn.session_id)
             conn.logger.bind(tag=TAG).info(f"识别文本: {text}")
             text_len, _ = remove_punctuation_and_length(text)
             if text_len > 0:
+                # 使用自定义模块进行上报
                 enqueue_tts_report(conn, 1, text, copy.deepcopy(conn.asr_audio))
-                await startToChat(conn, text) # startToChat内部会处理asr_server_receive的恢复
-            else: # 如果识别文本为空
-                if time.time() >= conn.block_asr_until:
-                    conn.asr_server_receive = True
-                else:
-                    conn.logger.bind(tag=TAG).debug(f"ASR(识别为空)尝试恢复，但仍被阻塞直到 {conn.block_asr_until:.2f}")
-                    if original_asr_receive_state and not conn.asr_server_receive:
-                         conn.logger.bind(tag=TAG).warning(f"ASR(识别为空)在阻塞期内，但original_asr_receive_state为True且当前为False。保持 conn.asr_server_receive = False. 当前时间: {time.time():.2f}, 阻塞至: {conn.block_asr_until:.2f}")
-                         conn.asr_server_receive = False
 
+                await startToChat(conn, text)
+            else:
+                conn.asr_server_receive = True
         conn.asr_audio.clear()
         conn.reset_vad_states()
 
@@ -94,11 +71,7 @@ async def startToChat(conn, text):
 
     if intent_handled:
         # 如果意图已被处理，不再进行聊天
-        # conn.asr_server_receive = True # 由 block_asr_until 控制
-        if time.time() >= conn.block_asr_until:
-            conn.asr_server_receive = True
-        else:
-            conn.logger.bind(tag=TAG).debug(f"ASR(意图处理后)尝试恢复，但仍被阻塞直到 {conn.block_asr_until:.2f}")
+        conn.asr_server_receive = True
         return
 
     # 意图未被处理，继续常规聊天流程
@@ -124,8 +97,10 @@ async def no_voice_close_connect(conn):
         ):
             conn.close_after_chat = True
             conn.client_abort = False
-            conn.asr_server_receive = False # 在发起自动结束对话前，也应禁用ASR，直到对话结束
-            prompt = "请你以\"时间过得真快\"为开头，用富有感情、依依不舍的话来结束这场对话吧。"
+            conn.asr_server_receive = False
+            prompt = (
+                "请你以“时间过得真快”未来头，用富有感情、依依不舍的话来结束这场对话吧。"
+            )
             await startToChat(conn, prompt)
 
 
