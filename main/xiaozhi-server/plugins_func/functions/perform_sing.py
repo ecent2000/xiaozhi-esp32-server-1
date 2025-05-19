@@ -1,9 +1,11 @@
 import asyncio
 import json
 import os
+import random
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from config.logger import setup_logging
-from core.utils.util import audio_to_data
+from core.utils import p3
+from core.utils.dialogue import Message
 
 TAG = __name__
 logger = setup_logging()
@@ -26,22 +28,31 @@ perform_sing_function_desc = {
     },
 }
 
+def _get_sing_intro_prompt(song_name: str) -> str:
+    """生成演唱歌曲的随机引导语"""
+    prompts = [
+        f"好的，接下来我为大家演唱一首《{song_name}》。",
+        f"请欣赏我带来的歌曲，《{song_name}》。",
+        f"下面，我来唱《{song_name}》。",
+        f"为你献上歌曲《{song_name}》。",
+    ]
+    return random.choice(prompts)
+
 @register_function("perform_sing", perform_sing_function_desc, ToolType.SYSTEM_CTL)
 def perform_sing(conn, song_name: str):
     """
     执行唱歌动作的函数。
-    会向客户端发送一个LLM消息，表明正在唱歌。
+    会向客户端发送一个LLM消息，表明正在唱歌，并通过audio_play_queue播放歌曲。
     """
     try:
         if hasattr(conn, 'loop') and conn.loop.is_running() and hasattr(conn, 'websocket') and hasattr(conn, 'session_id'):
             async def _send_sing_feedback_to_client(current_conn, current_song_name: str):
                 try:
                     session_id = current_conn.session_id
-                    # 假设一个默认的愉快表情，可以根据歌曲情感调整
                     emotion = "happy" 
-                    emoji = "🎤" # 唱歌的表情符号
+                    emoji = "🎤"
 
-                    # 发送开始唱歌的消息
+                    # 1. 发送开始唱歌的LLM消息 (保持不变)
                     llm_message_data = {
                         "type": "llm",
                         "text": emoji,
@@ -50,54 +61,83 @@ def perform_sing(conn, song_name: str):
                         "motion_data": {
                             "motion": "唱歌",
                             "song_name": current_song_name,
-                            "expression": "happy" # 默认开心，可以根据实际情况调整
+                            "expression": "happy"
                         }
                     }
                     message_json = json.dumps(llm_message_data, ensure_ascii=False)
                     logger.bind(tag=TAG).info(f"发送唱歌LLM消息到客户端: {message_json}")
                     await current_conn.websocket.send(message_json)
 
-                    # 设置语音输入状态，禁用语音输入
-                    current_conn.tts_first_text_index = 0
-                    current_conn.tts_last_text_index = 1
-                    current_conn.asr_server_receive = False
+                    # 2. 设置语音和服务状态
+                    current_conn.tts_first_text_index = 0 # 初始化TTS索引，相对于本次操作
+                    current_conn.tts_last_text_index = 0  # 将根据音频段数量增加
 
-                    # 处理音频文件
-                    music_file = os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "music", f"{current_song_name}.mp3"))
-                    logger.bind(tag=TAG).info(f"尝试加载音乐文件: {music_file}")
-                    if os.path.exists(music_file):
-                        # 转换音频为opus格式
-                        audio_datas, duration = audio_to_data(music_file)
-                        if audio_datas:
-                            # 发送音频数据
-                            for audio_data in audio_datas:
-                                await current_conn.websocket.send(audio_data)
-                            logger.bind(tag=TAG).info(f"已发送歌曲《{current_song_name}》的音频数据")
+                    # 3. 生成并播放引导语
+                    intro_text = _get_sing_intro_prompt(current_song_name)
+                    current_conn.dialogue.put(Message(role="assistant", content=intro_text))
+                    # 获取引导语在对话历史中的实际索引
+                    # intro_dialogue_idx = current_conn.dialogue.get_latest_assistant_message_index()
+                    # 使用相对索引 0 for intro text. Client will use conn.tts_first_text_index as base.
+                    
+                    tts_file_intro = await asyncio.to_thread(current_conn.tts.to_tts, intro_text)
+                    if tts_file_intro and os.path.exists(tts_file_intro):
+                        opus_packets_intro, _ = current_conn.tts.audio_to_opus_data(tts_file_intro)
+                        if opus_packets_intro:
+                            current_conn.audio_play_queue.put((opus_packets_intro, None, 0, None)) # 引导语使用相对索引0
+                            current_conn.tts_last_text_index = 1 # 下一个音频段的相对索引为1
+                        os.remove(tts_file_intro)
+                    
+                    # 4. 查找并处理歌曲文件
+                    music_root_dir = os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "music"))
+                    song_file_path = None
+                    possible_extensions = [".mp3", ".wav", ".p3"]
+                    for ext in possible_extensions:
+                        path_try = os.path.join(music_root_dir, f"{current_song_name}{ext}")
+                        if os.path.exists(path_try):
+                            song_file_path = path_try
+                            logger.bind(tag=TAG).info(f"找到歌曲文件: {song_file_path}")
+                            break
+                    
+                    if song_file_path:
+                        opus_packets_song = None
+                        duration = 0
+                        if song_file_path.endswith(".p3"):
+                            opus_packets_song, duration = p3.decode_opus_from_file(song_file_path)
                         else:
-                            logger.bind(tag=TAG).error(f"音频转换失败: {music_file}")
-                    else:
-                        logger.bind(tag=TAG).error(f"找不到歌曲文件: {music_file}")
+                            opus_packets_song, duration = current_conn.tts.audio_to_opus_data(song_file_path)
 
-                    # 发送结束唱歌的消息
+                        if opus_packets_song:
+                            # 歌曲音频使用下一个相对索引 (current_conn.tts_last_text_index)
+                            current_conn.audio_play_queue.put((opus_packets_song, None, current_conn.tts_last_text_index, None))
+                            logger.bind(tag=TAG).info(f"已将歌曲《{current_song_name}》的Opus数据放入播放队列")
+                        else:
+                            logger.bind(tag=TAG).error(f"歌曲《{current_song_name}》音频转换失败: {song_file_path}")
+                            # Można dodać komunikat TTS o błędzie, jeśli to konieczne
+                    else:
+                        logger.bind(tag=TAG).error(f"找不到歌曲文件: {current_song_name} (尝试的后缀: {possible_extensions}) 在目录 {music_root_dir}")
+                        # 可以选择发送一条TTS消息告知用户未找到歌曲
+                        error_text = f"抱歉，我没有找到歌曲《{current_song_name}》。"
+                        current_conn.dialogue.put(Message(role="assistant", content=error_text))
+                        tts_file_err = await asyncio.to_thread(current_conn.tts.to_tts, error_text)
+                        if tts_file_err and os.path.exists(tts_file_err):
+                            opus_packets_err, _ = current_conn.tts.audio_to_opus_data(tts_file_err)
+                            if opus_packets_err: # Error TTS uses current relative index
+                                current_conn.audio_play_queue.put((opus_packets_err, None, current_conn.tts_last_text_index, None))
+                            os.remove(tts_file_err)
+
+                    current_conn.llm_finish_task = True # 标记LLM任务完成
+
+                    # 5. 发送结束唱歌的消息 (保持，可能客户端需要)
                     await current_conn.websocket.send(json.dumps({
                         "type": "tts",
                         "state": "stop",
                         "session_id": session_id
                     }))
 
-                    # 恢复语音输入状态
-                    current_conn.tts_first_text_index = -1
-                    current_conn.tts_last_text_index = -1
-                    current_conn.asr_server_receive = True
-
                 except Exception as e_async:
                     logger.bind(tag=TAG).error(f"发送唱歌LLM消息时异步出错: {e_async}")
-                    # 确保在出错时也恢复语音输入状态
-                    current_conn.tts_first_text_index = -1
-                    current_conn.tts_last_text_index = -1
-                    current_conn.asr_server_receive = True
 
-            # 在事件循环中安全地运行异步任务
+
             asyncio.run_coroutine_threadsafe(
                 _send_sing_feedback_to_client(conn, song_name), 
                 conn.loop
@@ -106,17 +146,18 @@ def perform_sing(conn, song_name: str):
             logger.bind(tag=TAG).warning("无法发送唱歌LLM消息：conn 对象缺少 loop, websocket 或 session_id 属性，或者 loop 未运行。")
 
         logger.bind(tag=TAG).info(f"准备演唱: {song_name}")
+        # 返回 Action.NONE 表示指令已接收，异步处理播放
         return ActionResponse(
-            action=Action.RESPONSE, 
-            result="success", 
-            response=""
+            action=Action.NONE, 
+            result="指令已接收", 
+            response=f"好的，这就为您演唱歌曲《{song_name}》。" # 此文本通常由LLM处理，不直接TTS
         )
     except Exception as e:
         logger.bind(tag=TAG).error(f"执行唱歌 '{song_name}' 时出错: {e}")
         return ActionResponse(
             action=Action.RESPONSE, 
             result="error", 
-            response=""
+            response=f"演唱歌曲《{song_name}》时发生错误。"
         )
 
 # 确保 __init__.py 能够发现这个模块中的函数
