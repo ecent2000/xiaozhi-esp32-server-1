@@ -98,6 +98,7 @@ class ConnectionHandler:
         # 依赖的组件
         self.vad = None
         self.asr = None
+        self.asr_server_receive = True
         self._asr = _asr
         self._vad = _vad
         self.llm = _llm
@@ -114,7 +115,6 @@ class ConnectionHandler:
 
         # asr相关变量
         self.asr_audio = []
-        self.asr_server_receive = True
 
         # llm相关变量
         self.llm_finish_task = False
@@ -145,6 +145,9 @@ class ConnectionHandler:
         )  # 在原来第一道关闭的基础上加60秒，进行二道关闭
 
         self.audio_format = "opus"
+
+        self.block_asr_until = 0.0  # 新增状态：ASR阻塞截止时间戳
+        self.llm_task_created_time = 0
 
     async def handle_connection(self, ws):
         try:

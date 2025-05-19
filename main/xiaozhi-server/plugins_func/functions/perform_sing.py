@@ -1,6 +1,7 @@
 import asyncio
 import json
 import os
+import time
 from plugins_func.register import register_function, ToolType, ActionResponse, Action
 from config.logger import setup_logging
 from core.utils.util import audio_to_data
@@ -57,45 +58,38 @@ def perform_sing(conn, song_name: str):
                     logger.bind(tag=TAG).info(f"发送唱歌LLM消息到客户端: {message_json}")
                     await current_conn.websocket.send(message_json)
 
-                    # 设置语音输入状态，禁用语音输入
-                    current_conn.tts_first_text_index = 0
-                    current_conn.tts_last_text_index = 1
-                    current_conn.asr_server_receive = False
-
                     # 处理音频文件
                     music_file = os.path.normpath(os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "music", f"{current_song_name}.mp3"))
                     logger.bind(tag=TAG).info(f"尝试加载音乐文件: {music_file}")
                     if os.path.exists(music_file):
-                        # 转换音频为opus格式
                         audio_datas, duration = audio_to_data(music_file)
                         if audio_datas:
-                            # 发送音频数据
+                            playback_wait_time = duration + 0.8
+                            current_conn.block_asr_until = time.time() + playback_wait_time
+                            logger.bind(tag=TAG).info(f"ASR将阻塞直到: {current_conn.block_asr_until} (持续 {playback_wait_time}s)")
+
                             for audio_data in audio_datas:
                                 await current_conn.websocket.send(audio_data)
                             logger.bind(tag=TAG).info(f"已发送歌曲《{current_song_name}》的音频数据")
+                            
+                            await asyncio.sleep(playback_wait_time) 
+                            logger.bind(tag=TAG).info(f"歌曲播放等待结束.")
+
+                            await current_conn.websocket.send(json.dumps({
+                                "type": "tts",
+                                "state": "stop",
+                                "session_id": session_id
+                            }))
                         else:
                             logger.bind(tag=TAG).error(f"音频转换失败: {music_file}")
                     else:
                         logger.bind(tag=TAG).error(f"找不到歌曲文件: {music_file}")
 
-                    # 发送结束唱歌的消息
-                    await current_conn.websocket.send(json.dumps({
-                        "type": "tts",
-                        "state": "stop",
-                        "session_id": session_id
-                    }))
-
-                    # 恢复语音输入状态
-                    current_conn.tts_first_text_index = -1
-                    current_conn.tts_last_text_index = -1
-                    current_conn.asr_server_receive = True
-
                 except Exception as e_async:
                     logger.bind(tag=TAG).error(f"发送唱歌LLM消息时异步出错: {e_async}")
-                    # 确保在出错时也恢复语音输入状态
-                    current_conn.tts_first_text_index = -1
-                    current_conn.tts_last_text_index = -1
-                    current_conn.asr_server_receive = True
+                    # 确保在出错时也清除ASR阻塞
+                    current_conn.block_asr_until = 0.0
+                    logger.bind(tag=TAG).info(f"出错后ASR阻塞解除.")
 
             # 在事件循环中安全地运行异步任务
             asyncio.run_coroutine_threadsafe(
