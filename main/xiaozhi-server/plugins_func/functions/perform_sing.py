@@ -75,15 +75,6 @@ def perform_sing(conn, song_name: str):
                             await asyncio.sleep(playback_wait_time) 
                             logger.bind(tag=TAG).info(f"歌曲播放等待结束.")
 
-                            # 在恢复ASR（即 block_asr_until 到期）之前，做一些清理工作
-                            await asyncio.sleep(0.3) # 额外的小延迟，确保客户端播放完毕
-                            if hasattr(current_conn, 'asr_audio') and current_conn.asr_audio:
-                                logger.bind(tag=TAG).info(f"清除 perform_sing 后累积的 {len(current_conn.asr_audio)} 帧音频。")
-                                current_conn.asr_audio.clear()
-                            if hasattr(current_conn, 'reset_vad_states'):
-                                logger.bind(tag=TAG).info(f"重置VAD状态 from perform_sing.")
-                                current_conn.reset_vad_states() # 重置VAD检测状态
-                            
                             await current_conn.websocket.send(json.dumps({
                                 "type": "tts",
                                 "state": "stop",
@@ -109,18 +100,16 @@ def perform_sing(conn, song_name: str):
             logger.bind(tag=TAG).warning("无法发送唱歌LLM消息：conn 对象缺少 loop, websocket 或 session_id 属性，或者 loop 未运行。")
 
         logger.bind(tag=TAG).info(f"准备演唱: {song_name}")
-        # 修改返回类型，告知LLM流程已完成，不需要LLM生成额外回复
         return ActionResponse(
-            action=Action.REQLLM, 
-            result="SINGING_COMPLETED_NO_LLM_RESPONSE", 
-            response="" # response 字段对于 REQLLM 不重要，但按结构提供
+            action=Action.RESPONSE, 
+            result="success", 
+            response=""
         )
     except Exception as e:
         logger.bind(tag=TAG).error(f"执行唱歌 '{song_name}' 时出错: {e}")
-        # 出错时也明确告知LLM流程，避免LLM尝试回复错误状态
         return ActionResponse(
-            action=Action.REQLLM, 
-            result="SINGING_ERROR_NO_LLM_RESPONSE", 
+            action=Action.RESPONSE, 
+            result="error", 
             response=""
         )
 
