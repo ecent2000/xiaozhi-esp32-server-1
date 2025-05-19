@@ -897,6 +897,23 @@ class ConnectionHandler:
             self.dialogue.put(Message(role="assistant", content=text))
         elif result.action == Action.REQLLM:  # 调用函数后再请求llm生成回复
             text = result.result
+
+            # 新增：处理特殊指令，表示函数已完成所有交互，不需要LLM后续回复
+            if text == "SINGING_COMPLETED_NO_LLM_RESPONSE" or text == "SINGING_ERROR_NO_LLM_RESPONSE":
+                self.logger.bind(tag=TAG).info(f"函数 {function_call_data.get('name', 'unknown')} 执行完毕 ({text})，不请求LLM生成后续回复。")
+                # 如果是唱歌完成，可能需要确保ASR在短暂延迟后能正确开启，因为没有后续LLM交互来管理asr_server_receive
+                # 但 perform_sing 内部的 block_asr_until 应该已经处理了ASR的恢复时机
+                # 确保llm_finish_task为True，表示一轮交互结束
+                self.llm_finish_task = True 
+                # 此处可能需要显式地将 asr_server_receive 设置为 True，如果 block_asr_until 机制依赖后续的LLM流程来最终恢复它
+                # 检查 block_asr_until 是否仍然有效
+                if time.time() >= self.block_asr_until:
+                    self.asr_server_receive = True
+                    self.logger.bind(tag=TAG).debug(f"ASR恢复，因为函数 {function_call_data.get('name', 'unknown')} 完成且无需LLM回复，且ASR阻塞已到期。")
+                else:
+                    self.logger.bind(tag=TAG).debug(f"函数 {function_call_data.get('name', 'unknown')} 完成无需LLM回复，但ASR仍被阻塞直到 {self.block_asr_until:.2f}")
+                return # 直接返回，不进行后续的dialogue.put和chat_with_function_calling
+
             if text is not None and len(text) > 0:
                 function_id = function_call_data["id"]
                 function_name = function_call_data["name"]
