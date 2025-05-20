@@ -96,14 +96,18 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
         distance_metric (str): 用于计算相似度的距离度量 (例如: "cosine", "euclidean")。
         enforce_detection (bool): 是否强制执行人脸检测。若为False，则假定输入图像已是裁剪好的人脸。
         benchmark (bool): 是否显示性能测试信息。
+    返回:
+        list | dict: 成功时返回包含识别结果字典的列表，失败时返回包含错误信息的字典。
     """
     if not os.path.exists(image_to_check_path):
         print(f"错误: 待识别的图片路径 '{image_to_check_path}' 不存在。")
-        return
+        return {"error": f"待识别的图片路径 '{image_to_check_path}' 不存在。"}
 
     if not os.path.exists(database_path) or not os.listdir(database_path):
         print(f"错误: 人脸数据库路径 '{database_path}' 不存在或为空。请先使用 'add' 命令添加人脸。")
-        return
+        return {"error": f"人脸数据库路径 '{database_path}' 不存在或为空。"}
+
+    recognition_results = [] # 用于存储所有识别结果
 
     try:
         print(f"正在使用模型 '{model_name}' 和距离度量 '{distance_metric}' 进行人脸识别...")
@@ -149,11 +153,12 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
 
         if not isinstance(dfs, list):
             print(f"错误: DeepFace.find 返回了意外的格式 (期望列表，得到 {type(dfs)})。")
-            return
+            return {"error": f"DeepFace.find 返回了意外的格式 (期望列表，得到 {type(dfs)})。"}
             
         if not dfs: # 列表为空
             print("在输入图片中没有检测到人脸，或者 DeepFace.find 返回为空列表。")
-            return
+            # 根据具体情况，这里可以返回空列表表示未检测到，或者一个特定的消息
+            return [] # 或者 {"message": "未检测到人脸或无匹配项"}
 
         processed_faces_count = 0
         for i, df_region in enumerate(dfs):
@@ -175,7 +180,9 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
             
             identity_path = most_similar_match.get('identity', "未知路径")
             distance = most_similar_match.get('distance', float('inf'))
-            threshold = most_similar_match.get('threshold', 0.4) # 阈值也由DeepFace提供，随模型和度量变化
+            # threshold = most_similar_match.get('threshold', 0.4) # 阈值也由DeepFace提供，随模型和度量变化
+            # 在新版本的deepface中，DataFrame直接包含threshold列，对应每个匹配项
+            threshold = most_similar_match.get(f'{model_name}_{distance_metric}_threshold', 0.4)
 
             # 从 'identity' 路径中提取人物姓名
             # 假设数据库结构是 database_path/Person_Name/image.jpg
@@ -203,15 +210,25 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
                 except Exception as e_parse:
                     identified_person_name = f"解析名称出错 ({e_parse})"
             
-            print(f"  最佳匹配图片: {identity_path}")
-            print(f"  识别出的人物 (可能): {identified_person_name}")
-            print(f"  与数据库记录的距离: {distance:.4f} (模型阈值: {threshold:.4f})")
+            # print(f"  最佳匹配图片: {identity_path}")
+            # print(f"  识别出的人物 (可能): {identified_person_name}")
+            # print(f"  与数据库记录的距离: {distance:.4f} (模型阈值: {threshold:.4f})")
 
-            if distance <= threshold:
-                print(f"  结论: 确认身份为 '{identified_person_name}' (置信度高)")
-            else:
-                print(f"  结论: 未能确认身份 (或与 '{identified_person_name}' 相似度不足)")
-        
+            confirmed = distance <= threshold
+            # if confirmed:
+            #     print(f"  结论: 确认身份为 '{identified_person_name}' (置信度高)")
+            # else:
+            #     print(f"  结论: 未能确认身份 (或与 '{identified_person_name}' 相似度不足)")
+            
+            recognition_results.append({
+                "face_area_index": i + 1,
+                "identity_path": identity_path,
+                "identified_person_name": identified_person_name,
+                "distance": round(float(distance), 4),
+                "threshold": round(float(threshold), 4),
+                "confirmed": confirmed
+            })
+
         if processed_faces_count == 0 :
             if not any(not df.empty for df in dfs): # 所有dataframe都为空
                  print("图片中检测到人脸，但在数据库中没有找到任何匹配项。")
@@ -225,22 +242,31 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
             print(f"模型推理耗时: {inference_time:.2f} 秒")
             if processed_faces_count > 0:
                 print(f"平均每张人脸推理时间: {inference_time/processed_faces_count:.2f} 秒")
+        
+        return recognition_results
 
     except FileNotFoundError: # 应该由脚本开头的检查捕获
         print(f"错误: 图片路径 '{image_to_check_path}' 或数据库路径 '{database_path}' 未找到。")
+        return {"error": f"图片路径 '{image_to_check_path}' 或数据库路径 '{database_path}' 未找到。"}
     except ValueError as ve: 
+        error_message = ""
         if "Face detector" in str(ve) and "could not find any face" in str(ve):
-             print(f"错误: 使用 '{model_name}' 的人脸检测器未能在输入图片 '{image_to_check_path}' 中找到人脸。")
+             error_message = f"错误: 使用 '{model_name}' 的人脸检测器未能在输入图片 '{image_to_check_path}' 中找到人脸。"
+             print(error_message)
              print("建议: 尝试不同检测后端(detector_backend), 或确保图片中人脸清晰可见。")
         elif "No image found in" in str(ve) or "cannot be read" in str(ve): # 来自DeepFace的错误
-             print(f"错误: 在数据库 '{database_path}' 中没有找到有效的图片，或者图片无法读取。")
+             error_message = f"错误: 在数据库 '{database_path}' 中没有找到有效的图片，或者图片无法读取。"
+             print(error_message)
              print("建议: 检查数据库路径和内容，确保包含有效的图片文件。")
         else:
-            print(f"处理图片时发生值错误: {ve}")
+            error_message = f"处理图片时发生值错误: {ve}"
+            print(error_message)
             traceback.print_exc()
+        return {"error": error_message, "details": str(ve)}
     except Exception as e:
         print(f"人脸识别过程中发生未知错误: {e}")
         traceback.print_exc()
+        return {"error": f"人脸识别过程中发生未知错误: {e}", "details": str(e)}
 
 
 def main():
