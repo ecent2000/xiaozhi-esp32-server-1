@@ -103,9 +103,18 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
         print(f"错误: 待识别的图片路径 '{image_to_check_path}' 不存在。")
         return {"error": f"待识别的图片路径 '{image_to_check_path}' 不存在。"}
 
-    if not os.path.exists(database_path) or not os.listdir(database_path):
-        print(f"错误: 人脸数据库路径 '{database_path}' 不存在或为空。请先使用 'add' 命令添加人脸。")
-        return {"error": f"人脸数据库路径 '{database_path}' 不存在或为空。"}
+    # 修改后的数据库检查逻辑
+    db_is_effectively_empty = True
+    if os.path.exists(database_path):
+        # 检查数据库目录是否包含任何子目录 (代表人物)
+        if any(os.path.isdir(os.path.join(database_path, item)) for item in os.listdir(database_path)):
+            db_is_effectively_empty = False
+        elif not os.listdir(database_path): # 如果目录完全为空
+            db_is_effectively_empty = True
+    
+    if db_is_effectively_empty:
+        print(f"提示: 人脸数据库 '{database_path}' 为空或不包含已注册的人物数据。识别结果将为空。")
+        return [] # 返回空列表，表示未识别到任何人脸
 
     recognition_results = [] # 用于存储所有识别结果
 
@@ -226,7 +235,7 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
                 "identified_person_name": identified_person_name,
                 "distance": round(float(distance), 4),
                 "threshold": round(float(threshold), 4),
-                "confirmed": confirmed
+                "confirmed": bool(confirmed)
             })
 
         if processed_faces_count == 0 :
