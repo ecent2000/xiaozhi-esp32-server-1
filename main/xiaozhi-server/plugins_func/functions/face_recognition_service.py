@@ -57,7 +57,7 @@ IDENTIFY_FACE_ENDPOINT = f"{DEEPFACE_MICROSERVICE_URL}/identify_face/"
 # 我们将不再需要检查本地 DB_PATH 是否存在或有数据。
 
 # 定义默认测试图片路径
-DEFAULT_RECOGNITION_IMAGE_PATH = r"F:\xiaozhi-esp32-server-1\main\xiaozhi-server\plugins_func\functions\face_recognition_py\test_images\test_image_01.jpg" # 保持路径分隔符的一致性
+DEFAULT_RECOGNITION_IMAGE_PATH = r"F:\xiaozhi-esp32-server-1\main\xiaozhi-server\plugins_func\functions\test_images\test_image_01.jpg" # 保持路径分隔符的一致性
 
 recognize_face_desc = {
     "type": "function",

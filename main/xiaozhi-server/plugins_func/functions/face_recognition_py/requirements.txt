@@ -1,9 +1,0 @@
-deepface
-pandas
-matplotlib
-imutils
-numpy
-fastapi
-uvicorn[standard]
-python-multipart
-requests
