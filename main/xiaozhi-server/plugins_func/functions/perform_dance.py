@@ -2,9 +2,18 @@ from plugins_func.register import register_function, ToolType, ActionResponse, A
 from config.logger import setup_logging
 import asyncio
 import json
+import os
+import random
+from pathlib import Path
+from core.utils import p3
+from core.handle.sendAudioHandle import send_stt_message
+from core.utils.dialogue import Message
 
 TAG = __name__
 logger = setup_logging()
+
+# 从 play_music.py 借鉴的音乐缓存和文件查找逻辑的简化版本
+MUSIC_CACHE_PERFORM_DANCE = {}
 
 perform_dance_function_desc = {
     "type": "function",
@@ -23,6 +32,97 @@ perform_dance_function_desc = {
         },
     },
 }
+
+def _get_random_play_prompt_for_dance(song_name):
+    """生成随机播放引导语"""
+    clean_name = os.path.splitext(song_name)[0]
+    prompts = [
+        f"正在为您的舞蹈 {clean_name} 配乐。",
+        f"请欣赏舞蹈 {clean_name} 的音乐。",
+        f"即将为舞蹈 {clean_name} 播放音乐。",
+        f"为您带来 {clean_name} 的伴奏。",
+    ]
+    return random.choice(prompts)
+
+async def _send_music_to_client_async(conn, dance_name: str):
+    """
+    异步查找并发送与舞蹈名称相关的音乐给客户端。
+    """
+    try:
+        # 初始化音乐相关配置 (简化版，实际应从 conn.config 获取)
+        if not MUSIC_CACHE_PERFORM_DANCE:
+            music_dir_config = conn.config.get("plugins", {}).get("play_music", {}).get("music_dir", "./music")
+            MUSIC_CACHE_PERFORM_DANCE["music_dir"] = os.path.abspath(music_dir_config)
+            MUSIC_CACHE_PERFORM_DANCE["music_ext"] = (".mp3", ".wav", ".p3")
+            MUSIC_CACHE_PERFORM_DANCE["music_files"] = []
+            if os.path.exists(MUSIC_CACHE_PERFORM_DANCE["music_dir"]):
+                for file in Path(MUSIC_CACHE_PERFORM_DANCE["music_dir"]).rglob("*"):
+                    if file.is_file() and file.suffix.lower() in MUSIC_CACHE_PERFORM_DANCE["music_ext"]:
+                        MUSIC_CACHE_PERFORM_DANCE["music_files"].append(str(file.relative_to(MUSIC_CACHE_PERFORM_DANCE["music_dir"])))
+
+        if not MUSIC_CACHE_PERFORM_DANCE.get("music_files"):
+            logger.bind(tag=TAG).warning(f"音乐目录 {MUSIC_CACHE_PERFORM_DANCE.get('music_dir', 'N/A')} 为空或未找到音乐文件。")
+            return
+
+        # 尝试根据 dance_name 查找音乐 (简单匹配文件名包含 dance_name)
+        # 注意：这里的匹配逻辑非常简单，实际应用中可能需要更复杂的匹配算法
+        # 例如，使用 difflib 或其他模糊匹配库，或者期望音乐文件名与 dance_name 精确对应。
+        # 为了演示，这里仅作了简化处理。
+        selected_music_file = None
+        for music_file in MUSIC_CACHE_PERFORM_DANCE["music_files"]:
+            if dance_name.lower() in music_file.lower():
+                selected_music_file = music_file
+                break
+        
+        if not selected_music_file:
+            logger.bind(tag=TAG).info(f"未找到与舞蹈 '{dance_name}' 直接相关的音乐，尝试随机播放一首。")
+            selected_music_file = random.choice(MUSIC_CACHE_PERFORM_DANCE["music_files"])
+
+
+        if selected_music_file:
+            music_path = os.path.join(MUSIC_CACHE_PERFORM_DANCE["music_dir"], selected_music_file)
+            if not os.path.exists(music_path):
+                logger.bind(tag=TAG).error(f"选定的音乐文件不存在: {music_path}")
+                return
+
+            # 发送引导语
+            prompt_text = _get_random_play_prompt_for_dance(selected_music_file)
+            await send_stt_message(conn, prompt_text) # 假设 conn.send_stt_message 是异步的或者可以安全调用
+            conn.dialogue.put(Message(role="assistant", content=prompt_text))
+            
+            # 重置TTS索引，确保引导语优先播放
+            # conn.tts_first_text_index = 0 # 移除这两行，因为play_music.py中的conn.tts_first_text_index = 0是在主线程中设置的，这里是异步的，可能会导致冲突
+            # conn.tts_last_text_index = 0
+
+            tts_file = await asyncio.to_thread(conn.tts.to_tts, prompt_text) # TTS转换
+            if tts_file and os.path.exists(tts_file):
+                # conn.tts_last_text_index += 1 # 移除这一行，因为play_music.py中的conn.tts_first_text_index = 0是在主线程中设置的，这里是异步的，可能会导致冲突
+                opus_packets_prompt, _ = conn.tts.audio_to_opus_data(tts_file)
+                conn.audio_play_queue.put((opus_packets_prompt, None, 0, None)) # 引导语 Opus，索引设为0确保优先
+                os.remove(tts_file)
+
+            # 播放音乐
+            if music_path.endswith(".p3"):
+                opus_packets_music, _ = p3.decode_opus_from_file(music_path)
+            else:
+                opus_packets_music, _ = conn.tts.audio_to_opus_data(music_path) # 对于非.p3，也用audio_to_opus_data转换
+            
+            # 确保音乐在引导语之后播放，这里的索引需要小心处理
+            # 理想情况下，应该有一个机制来管理音频队列的播放顺序和索引
+            # 为简单起见，我们假设引导语播放后，下一个索引是1 (或更大，取决于是否有其他音频在队列中)
+            # 这里我们用一个较大的数字，或者依赖于conn.tts_last_text_index的正确管理（如果在主线程中更新）
+            # conn.audio_play_queue.put((opus_packets_music, None, conn.tts_last_text_index, None))
+            # 暂时使用固定索引1，表示在引导语（索引0）之后。这可能需要根据实际的音频队列管理进行调整。
+            conn.audio_play_queue.put((opus_packets_music, None, 1, None))
+
+
+            logger.bind(tag=TAG).info(f"已将音乐 '{selected_music_file}' 添加到播放队列。")
+        else:
+            logger.bind(tag=TAG).info(f"未找到与舞蹈 '{dance_name}' 相关的音乐，也无音乐可随机播放。")
+
+    except Exception as e_music:
+        logger.bind(tag=TAG).error(f"发送舞蹈相关音乐时异步出错: {e_music} traceback: {json.dumps(asyncio.traceback.format_exc())}")
+
 
 @register_function("perform_dance", perform_dance_function_desc, ToolType.SYSTEM_CTL)
 def perform_dance(conn, dance_name: str):
@@ -50,8 +150,12 @@ def perform_dance(conn, dance_name: str):
                     message_json = json.dumps(llm_message_data, ensure_ascii=False)
                     logger.bind(tag=TAG).info(f"发送舞蹈LLM消息到客户端: {message_json}")
                     await current_conn.websocket.send(message_json)
+
+                    # 在发送舞蹈动作反馈后，异步尝试发送音乐
+                    await _send_music_to_client_async(current_conn, current_dance_name)
+
                 except Exception as e_async:
-                    logger.bind(tag=TAG).error(f"发送舞蹈LLM消息时异步出错: {e_async}")
+                    logger.bind(tag=TAG).error(f"发送舞蹈LLM消息或音乐时异步出错: {e_async}")
 
             # 在事件循环中安全地运行异步任务
             asyncio.run_coroutine_threadsafe(
