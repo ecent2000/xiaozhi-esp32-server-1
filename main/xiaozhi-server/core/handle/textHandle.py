@@ -8,6 +8,10 @@ from core.handle.iotHandle import handleIotDescriptors, handleIotStatus
 from core.handle.ttsReportHandle import enqueue_tts_report
 import asyncio
 
+# Added imports
+from plugins_func.functions.face_recognition_service import process_uploaded_face_image
+from plugins_func.register import Action
+
 TAG = __name__
 
 
@@ -68,6 +72,53 @@ async def handleTextMessage(conn, message):
                 asyncio.create_task(handleIotDescriptors(conn, msg_json["descriptors"]))
             if "states" in msg_json:
                 asyncio.create_task(handleIotStatus(conn, msg_json["states"]))
+            
+            # New logic for handling iot messages with image_data
+            if "image_data" in msg_json:
+                image_data_base64 = msg_json["image_data"]
+                conn.logger.bind(tag=TAG).info(f"收到包含 image_data 的 IoT 消息，准备进行人脸识别。")
+
+                action_response = None 
+                try:
+                    # Run the blocking face recognition function in a thread pool
+                    action_response = await conn.loop.run_in_executor(
+                        conn.executor,
+                        process_uploaded_face_image, 
+                        conn,                      
+                        image_data_base64          
+                    )
+                    
+                    conn.logger.bind(tag=TAG).info(f"人脸识别服务返回: action={action_response.action}, result='{action_response.result}', response='{action_response.response}'")
+
+                    text_for_llm = None
+                    if action_response.action == Action.REQLLM:
+                        text_for_llm = action_response.result
+                        if not text_for_llm: 
+                            conn.logger.bind(tag=TAG).warning("人脸识别 REQLLM 但 result 为空。")
+                            text_for_llm = "人脸识别已尝试处理，但没有具体结果可报告。"
+                    # process_uploaded_face_image in face_recognition_service.py primarily returns REQLLM.
+                    # It wraps errors within REQLLM, setting result to the error message.
+                    # Explicit checks for Action.RESPONSE or Action.ERROR are for robustness against
+                    # potential future changes in that service, though not strictly needed with its current version.
+                    elif action_response.action == Action.RESPONSE: 
+                        text_for_llm = action_response.response or action_response.result
+                        if not text_for_llm:
+                            conn.logger.bind(tag=TAG).warning("人脸识别 RESPONSE 但 response 和 result 都为空。")
+                            text_for_llm = "人脸识别操作已完成。"
+                    elif action_response.action == Action.ERROR: 
+                        error_detail = action_response.result or "未知详情"
+                        text_for_llm = f"抱歉，人脸识别过程中似乎出了点问题：{error_detail}"
+                    else: # Handles any unexpected action type
+                        conn.logger.bind(tag=TAG).error(f"未知或未处理的人脸识别 Action: {action_response.action}")
+                        text_for_llm = "人脸识别操作完成，但返回了意外的状态。"
+
+                    if text_for_llm:
+                        await startToChat(conn, text_for_llm)
+
+                except Exception as e:
+                    conn.logger.bind(tag=TAG).error(f"调用或处理人脸识别服务时发生异常: {e}", exc_info=True)
+                    await startToChat(conn, f"抱歉，尝试处理人脸识别请求时系统遇到内部错误。")
+
         elif msg_json["type"] == "server":
             # 如果配置是从API读取的，则需要验证secret
             if not conn.read_config_from_api:
@@ -141,3 +192,12 @@ async def handleTextMessage(conn, message):
                 await conn.handle_restart(msg_json)
     except json.JSONDecodeError:
         await conn.websocket.send(message)
+    except Exception as e: 
+        conn.logger.bind(tag=TAG).error(f"处理文本消息时发生根级别意外错误: {e}", exc_info=True)
+        try:
+            await conn.websocket.send(json.dumps({
+                "type": "error",
+                "message": "处理您的请求时发生服务器内部错误。"
+            }))
+        except Exception as send_e:
+            conn.logger.bind(tag=TAG).error(f"发送根级别错误消息到客户端失败: {send_e}")

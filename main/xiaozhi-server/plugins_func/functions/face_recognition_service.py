@@ -3,6 +3,10 @@ import sys
 import logging
 import requests # 新增：用于 HTTP 请求
 import json # 新增：用于处理响应
+import asyncio # 新增：用于 run_coroutine_threadsafe
+import time # 新增：用于生成时间戳和临时文件名
+import base64 # 新增：用于处理客户端上传的图片数据
+import tempfile # 新增：虽然未使用，但通常与临时文件相关，这里用自定义路径
 
 # 配置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -10,21 +14,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 # --- 动态路径设置 --- 
 current_script_dir = os.path.dirname(os.path.abspath(__file__))
 face_recognition_module_dir = os.path.join(current_script_dir, "face_recognition_py")
-
-# 移除 deepface_manager 的直接导入
-# if face_recognition_module_dir not in sys.path:
-#     sys.path.append(face_recognition_module_dir)
-# try:
-#     from deepface_manager import identify_faces_in_image, DEFAULT_DB_PATH, add_face_to_database as dm_add_face
-#     logging.info("成功导入 deepface_manager 模块。")
-# except ImportError as e:
-#     logging.error(f"无法导入 deepface_manager: {e}. 请确保其在 '{face_recognition_module_dir}' 下。")
-#     # Stubs for deepface_manager functions if import fails
-#     def identify_faces_in_image(*args, **kwargs):
-#         return {"error": "deepface_manager 模块导入失败"} 
-#     def dm_add_face(*args, **kwargs):
-#         raise RuntimeError("deepface_manager not loaded, cannot add face.")
-#     DEFAULT_DB_PATH = "dataset" # 仍然保留，但意义改变
 
 try:
     from plugins_func.register import register_function, ToolType, ActionResponse, Action 
@@ -47,123 +36,216 @@ DEEPFACE_MICROSERVICE_URL = "http://localhost:8001" # 微服务地址，后续�
 ADD_FACE_ENDPOINT = f"{DEEPFACE_MICROSERVICE_URL}/add_face/"
 IDENTIFY_FACE_ENDPOINT = f"{DEEPFACE_MICROSERVICE_URL}/identify_face/"
 
-# DB_PATH 的概念改变：现在它更多地是指向微服务管理的数据库，而不是本地路径
-# 不过，为了保持函数签名和原有逻辑的兼容性（例如检查数据库是否为空），
-# 我们可以保留 DB_PATH，但它的含义是抽象的。
-# 实际的数据库文件管理由微服务完成。
-# DEFAULT_DB_PATH 仍然可以来自 deepface_manager (如果需要引用其原始值)
-# 或者在这里定义一个象征性的值。由于 dm_add_face 和 identify_faces_in_image
-# 不再直接使用，DEFAULT_DB_PATH 的直接本地文件系统意义减弱。
-# 我们将不再需要检查本地 DB_PATH 是否存在或有数据。
-
 # 定义默认测试图片路径
-DEFAULT_RECOGNITION_IMAGE_PATH = r"F:\xiaozhi-esp32-server-1\main\xiaozhi-server\plugins_func\functions\test_images\test_image_01.jpg" # 保持路径分隔符的一致性
+# DEFAULT_RECOGNITION_IMAGE_PATH 不再是此流程的主要输入
+# DEFAULT_RECOGNITION_IMAGE_PATH = r"F:\\xiaozhi-esp32-server-1\\main\\xiaozhi-server\\plugins_func\\functions\\test_images\\test_image_01.jpg"
 
 recognize_face_desc = {
     "type": "function",
     "function": {
         "name": "recognize_face_in_image",
-        "description": "使用人脸识别微服务识别指定图片中的人脸。如果未提供图片路径，则会尝试识别一个预设的测试图片。",
+        "description": "启动人脸识别流程。系统将请求与小植连接的客户端App通过摄像头提供一张实时照片，然后使用该照片进行身份识别。",
         "parameters": {
             "type": "object",
-            "properties": {
-                "image_path": {
-                    "type": "string", 
-                    "description": "(可选) 需要进行人脸识别的本地图片路径。例如 D:/images/photo.jpg。如果留空，将使用默认测试图片。"
-                }
-            },
+            "properties": {}, # 无需外部参数来启动此流程
             "required": [] 
         }
     }
 }
 
 @register_function("recognize_face_in_image", recognize_face_desc, ToolType.SYSTEM_CTL)
-def recognize_face_in_image(conn, image_path: str = None) -> ActionResponse:
-    actual_image_path = image_path
-    if not actual_image_path:
-        logging.info(f"未提供 image_path，将使用默认测试图片路径: {DEFAULT_RECOGNITION_IMAGE_PATH}")
-        actual_image_path = DEFAULT_RECOGNITION_IMAGE_PATH
+def recognize_face_in_image(conn, image_path: str = None) -> ActionResponse: # image_path 参数在此流程中通常不被使用
+    logging.info("recognize_face_in_image: 启动人脸识别流程，请求客户端提供照片。")
+
+    # 1. 构建发送给客户端的指令
+    iot_message_data = {
+        "type": "iot",
+        "commands": ["face_recognition"]
+    }
+
+    # 2. 发送消息给客户端
+    if conn.websocket and conn.loop:
+        async def send_message_async():
+            try:
+                await conn.websocket.send(json.dumps(iot_message_data))
+                logging.info(f"已向客户端 {conn.client_ip} 发送人脸识别指令: {iot_message_data}")
+            except Exception as e:
+                logging.error(f"发送人脸识别指令给客户端失败: {e}")
+                raise # Propagate exception to be caught by future.result()
+
+        future = asyncio.run_coroutine_threadsafe(send_message_async(), conn.loop)
+        try:
+            future.result(timeout=5) 
+        except TimeoutError:
+            logging.error("发送人脸识别指令给客户端超时")
+            # 返回给用户的消息应该是友好的，result给LLM
+            return ActionResponse(action=Action.REQLLM, result="向客户端发送人脸识别指令超时。", response=None)
+        except Exception as e:
+            logging.error(f"发送人脸识别指令时发生错误: {e}")
+            return ActionResponse(action=Action.REQLLM, result=f"向客户端发送人脸识别指令时发生错误: {str(e)}", response=None)
     else:
-        logging.info(f"使用提供的图片路径进行识别: {actual_image_path}")
+        logging.error("recognize_face_in_image: conn.websocket 或 conn.loop 不可用，无法发送消息。")
+        return ActionResponse(action=Action.REQLLM, result="系统内部错误，无法发送指令给客户端。", response=None)
 
-    if not isinstance(actual_image_path, str) or not actual_image_path.strip():
-        logging.error("recognize_face_in_image: 最终的 image_path 无效或为空。")
-        return ActionResponse(action=Action.RESPONSE, result="参数错误", response="最终解析的图片路径无效。")
-
-    if not os.path.isabs(actual_image_path):
-        logging.info(f"提供的图片路径 '{actual_image_path}' 是相对路径，将尝试直接使用。确保路径相对于服务运行位置正确。")
-
-    if not os.path.exists(actual_image_path):
-        logging.error(f"recognize_face_in_image: 图片文件未找到 '{actual_image_path}'")
-        user_message = f"图片文件 '{os.path.basename(actual_image_path)}' 未找到。"
-        if actual_image_path == DEFAULT_RECOGNITION_IMAGE_PATH:
-            user_message += " (这是预设的测试图片路径，请检查该文件是否存在)"
-        return ActionResponse(action=Action.RESPONSE, result="文件未找到", response=user_message)
+    # 3. 返回 ActionResponse
+    user_facing_response = "我已经向您的App发送了拍照请求，请您按照App上的提示完成人脸识别操作。" # 这个可以考虑是否需要，如果LLM会回复的话
+    llm_facing_result = f"已通知用户进行人脸识别操作。App端已发送指令: {iot_message_data['commands']}。等待用户通过App上传照片。"
     
-    # 数据库存在和是否为空的检查现在由微服务处理，此处不再检查本地DB_PATH
-    logging.info(f"开始调用人脸识别微服务: 图片='{actual_image_path}'")
+    logging.info(f"recognize_face_in_image: 流程已启动，返回 ActionResponse。LLM result: '{llm_facing_result}'")
+    
+    return ActionResponse(action=Action.REQLLM, result=llm_facing_result, response=None)
+
+
+def _save_uploaded_image(image_data_base64: str, conn_session_id: str) -> str | None:
+    """辅助函数：保存上传的 base64 图片到临时文件，返回文件路径"""
+    try:
+        # 移除可能的 base64 头部 (e.g., "data:image/jpeg;base64,")
+        image_format = "jpg"  # 默认格式
+        if ',' in image_data_base64:
+            header, image_data_base64 = image_data_base64.split(',', 1)
+            # 从header中提取图片格式
+            if "image/jpeg" in header.lower() or "image/jpg" in header.lower():
+                image_format = "jpg"
+            elif "image/png" in header.lower():
+                image_format = "png"
+            elif "image/webp" in header.lower():
+                image_format = "webp"
+            else:
+                logging.warning(f"未知图片格式: {header}，使用默认jpg格式")
+        
+        # 验证base64数据不为空
+        if not image_data_base64.strip():
+            logging.error("Base64图片数据为空")
+            return None
+            
+        image_bytes = base64.b64decode(image_data_base64)
+        
+        # 验证解码后的数据不为空
+        if len(image_bytes) == 0:
+            logging.error("Base64解码后的图片数据为空")
+            return None
+            
+        # 简单验证图片格式（检查文件头）
+        if image_bytes[:4] == b'\xff\xd8\xff\xe0' or image_bytes[:4] == b'\xff\xd8\xff\xe1':
+            # JPEG 文件头
+            image_format = "jpg"
+        elif image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+            # PNG 文件头
+            image_format = "png"
+        elif image_bytes[:4] == b'RIFF' and image_bytes[8:12] == b'WEBP':
+            # WebP 文件头
+            image_format = "webp"
+        
+        temp_dir = os.path.join(current_script_dir, "tmp_face_images")
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        timestamp = time.strftime("%Y%m%d%H%M%S")
+        temp_file_name = f"face_upload_{conn_session_id}_{timestamp}.{image_format}"
+        temp_file_path = os.path.join(temp_dir, temp_file_name)
+        
+        with open(temp_file_path, 'wb') as f:
+            f.write(image_bytes)
+        
+        # 验证保存的文件是否有效
+        if not os.path.exists(temp_file_path) or os.path.getsize(temp_file_path) == 0:
+            logging.error(f"保存的图片文件无效: {temp_file_path}")
+            return None
+            
+        logging.info(f"客户端上传的人脸图片已保存到: {temp_file_path} (格式: {image_format}, 大小: {len(image_bytes)} bytes)")
+        return temp_file_path
+    except base64.binascii.Error as b64_error:
+        logging.error(f"Base64解码失败: {b64_error}. 输入数据 (前100字符): {image_data_base64[:100]}", exc_info=True)
+        return None
+    except Exception as e:
+        logging.error(f"保存上传的图片失败: {e}", exc_info=True)
+        return None
+
+def process_uploaded_face_image(conn, image_data_base64: str) -> ActionResponse:
+    """
+    处理客户端上传的用于人脸识别的图片。
+    这个函数应该在 ConnectionHandler 收到客户端图片后被调用。
+    """
+    logging.info(f"process_uploaded_face_image: 开始处理客户端上传的图片数据 (session: {conn.session_id}).")
+
+    temp_image_path = _save_uploaded_image(image_data_base64, conn.session_id)
+
+    if not temp_image_path:
+        return ActionResponse(action=Action.REQLLM, result="处理上传图片失败，无法正确保存图片数据。", response=None)
+
+    logging.info(f"开始调用人脸识别微服务 (客户端图片): 图片='{temp_image_path}'")
     
     try:
-        with open(actual_image_path, 'rb') as img_file:
-            files = {'image': (os.path.basename(actual_image_path), img_file, 'image/jpeg')} # 假设jpeg,可改进
-            data = {'enforce_detection': True}
+        with open(temp_image_path, 'rb') as img_file:
+            files = {'image': (os.path.basename(temp_image_path), img_file, 'image/jpeg')} # 假设jpeg
+            data = {'enforce_detection': True} # 和原逻辑一致
             
-            response = requests.post(IDENTIFY_FACE_ENDPOINT, files=files, data=data, timeout=60) # 增加超时
-            response.raise_for_status() # 如果HTTP错误 (4xx or 5xx), 会抛出异常
-            
+            # 使用 IDENTIFY_FACE_ENDPOINT
+            response = requests.post(IDENTIFY_FACE_ENDPOINT, files=files, data=data, timeout=60)
+            response.raise_for_status()
             response_data = response.json()
 
-        # 处理微服务返回的结果
         if response_data and "results" in response_data:
             identification_output = response_data["results"]
-            # 后续处理与之前类似，但基于微服务返回的 identification_output
-            if isinstance(identification_output, dict) and "error" in identification_output: # 微服务内部逻辑错误
+            if isinstance(identification_output, dict) and "error" in identification_output:
                 error_msg = identification_output['error']
-                logging.error(f"人脸识别微服务报告错误: {error_msg}")
+                logging.error(f"人脸识别微服务报告错误 (客户端图片): {error_msg}")
                 return ActionResponse(action=Action.REQLLM, result=f"人脸识别失败: {error_msg}", response=None)
             elif isinstance(identification_output, list):
                 if not identification_output: 
-                    result_summary = f"在图片 '{os.path.basename(actual_image_path)}' 中未检测到人脸，或检测到的人脸在数据库中没有匹配项。"
-                    # 数据库是否为空的提示可以由微服务返回，或在这里根据特定响应码添加
-                    logging.info(f"识别人脸：{result_summary}")
+                    result_summary = f"在您提供的照片中未检测到有效人脸，或者检测到的人脸在我们的数据库中没有匹配项。"
+                    logging.info(f"识别人脸 (客户端图片): {result_summary}")
                     return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
                 
                 num_faces = len(identification_output)
                 confirmed_persons = []
                 for face_data in identification_output:
+                    # "identity" field in deepface is usually a list of paths, we need "identified_person_name" from our wrapper
                     if face_data.get("confirmed") and face_data.get("identified_person_name") != "未知身份":
                         confirmed_persons.append(face_data["identified_person_name"])
                 
                 if confirmed_persons:
-                    result_summary = f"在图片 '{os.path.basename(actual_image_path)}' 中识别出 {len(confirmed_persons)} 位已确认身份的人: {', '.join(list(set(confirmed_persons)))}。"
-                    if len(confirmed_persons) < num_faces:
-                         result_summary += f" (图片中共检测到 {num_faces} 张人脸区域)"
+                    unique_confirmed_persons = list(set(confirmed_persons))
+                    result_summary = f"根据您提供的照片，识别出 {len(unique_confirmed_persons)} 位已确认身份的人: {', '.join(unique_confirmed_persons)}。"
+                    if len(unique_confirmed_persons) < num_faces:
+                         result_summary += f" (照片中共检测到 {num_faces} 张人脸区域，部分未确认身份或为同一人多次出现)"
                 else:
-                    result_summary = f"在图片 '{os.path.basename(actual_image_path)}' 中检测到 {num_faces} 张人脸区域，但未能确认任何已知身份。"
-
-                logging.info(f"人脸识别成功: {result_summary}")
+                    result_summary = f"在您提供的照片中检测到 {num_faces} 张人脸区域，但未能确认任何已在我们数据库中的身份。"
+                logging.info(f"人脸识别成功 (客户端图片): {result_summary}")
                 return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
-            else: # 意外的 "results" 内容
+            else: 
                 raw_output_str = f"Type: {type(identification_output)}, Value: {str(identification_output)[:200]}"
-                logging.error(f"人脸识别微服务返回了意外的 'results' 格式: {raw_output_str}")
+                logging.error(f"人脸识别微服务返回了意外的 'results' 格式 (客户端图片): {raw_output_str}")
                 return ActionResponse(action=Action.REQLLM, result=f"人脸识别服务返回了意外的数据格式。", response=None)
-        elif response_data and "error" in response_data: # 微服务直接返回错误（例如，HTTP 400时FastAPI的detail）
+        elif response_data and "error" in response_data: # FastAPI detail field
             error_msg = response_data.get('detail', response_data['error'])
-            logging.error(f"人脸识别微服务调用失败 (来自响应体): {error_msg}")
+            logging.error(f"人脸识别微服务调用失败 (客户端图片, 来自响应体): {error_msg}")
             return ActionResponse(action=Action.REQLLM, result=f"人脸识别失败: {error_msg}", response=None)
-        else: # 响应体不符合预期
-            logging.error(f"人脸识别微服务返回未知格式响应: HTTP {response.status_code}, Body: {response.text[:200]}")
+        else:
+            logging.error(f"人脸识别微服务返回未知格式响应 (客户端图片): HTTP {response.status_code}, Body: {response.text[:200]}")
             return ActionResponse(action=Action.REQLLM, result="人脸识别服务通讯或响应格式错误。", response=None)
 
     except requests.exceptions.RequestException as e:
-        logging.error(f"调用人脸识别微服务失败: {e}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result=f"无法连接到人脸识别服务: {e}", response=None)
+        logging.error(f"调用人脸识别微服务失败 (客户端图片): {e}", exc_info=True)
+        return ActionResponse(action=Action.REQLLM, result=f"无法连接到人脸识别服务: {str(e).splitlines()[-1]}", response=None)
     except json.JSONDecodeError as e:
-        logging.error(f"解析人脸识别微服务响应失败: {e}. Response text: {response.text[:200]}", exc_info=True)
+        logging.error(f"解析人脸识别微服务响应失败 (客户端图片): {e}. Last response text (if any): {response.text[:200] if 'response' in locals() else 'N/A'}", exc_info=True)
         return ActionResponse(action=Action.REQLLM, result="解析人脸识别服务响应时出错。", response=None)
     except Exception as e:
-        logging.error(f"处理人脸识别时发生未知错误: {e}", exc_info=True)
+        logging.error(f"处理人脸识别时发生未知错误 (客户端图片): {e}", exc_info=True)
         return ActionResponse(action=Action.REQLLM, result=f"处理人脸识别时发生意外错误: {str(e)}", response=None)
+    finally:
+        if temp_image_path and os.path.exists(temp_image_path):
+            # 如果需要永久保留图片，注释掉下面的os.remove和相关的日志
+            # try:
+            #     os.remove(temp_image_path)
+            #     logging.info(f"已清理临时图片文件: {temp_image_path}")
+            # except Exception as e_remove:
+            #     logging.error(f"清理临时图片文件失败 '{temp_image_path}': {e_remove})
+            
+            # 如果选择保留，可以记录文件已保留
+            logging.info(f"图片文件已保留在: {temp_image_path}")
+        elif temp_image_path: # 文件未成功保存但路径已生成
+            logging.info(f"临时图片路径已生成但文件不存在: {temp_image_path}")
 
 
 add_face_desc = {
@@ -240,60 +322,3 @@ def add_face_for_recognition(conn, image_path: str, person_name: str) -> ActionR
     except Exception as e: # 包括 dm_add_face 可能抛出的 RuntimeError 等
         logging.error(f"添加人脸时发生未知错误: {e}", exc_info=True)
         return ActionResponse(action=Action.REQLLM, result=f"添加人脸时发生意外错误: {str(e)}", response=None)
-
-
-if __name__ == '__main__':
-    class MockConn:
-        def __init__(self):
-            self.config = {}
-            self.client_ip = "127.0.0.1"
-            self.logger = logging.getLogger("MockConn") # Use standard logging
-            # self.logger.setLevel(logging.INFO) # Already configured by basicConfig
-            # if not self.logger.handlers:
-            #     self.logger.addHandler(logging.StreamHandler())
-    mock_conn = MockConn()
-
-    logging.info(f"测试模式: 当前脚本目录: {current_script_dir}")
-    # logging.info(f"测试模式: face_recognition_module_dir: {face_recognition_module_dir}") # Still relevant
-    # logging.info(f"测试模式: DB_PATH (数据库路径): {DB_PATH}") # DB_PATH is no longer a local FS path
-
-    # 确保微服务已启动并监听在 DEEPFACE_MICROSERVICE_URL (e.g., http://localhost:8001)
-    logging.info(f"--- 前提: 请确保 DeepFace 微服务正在运行于 {DEEPFACE_MICROSERVICE_URL} ---")
-
-    # 用户指定的测试图片路径
-    USER_SPECIFIED_TEST_IMAGE_PATH_ADD = r"F:\xiaozhi-esp32-server-1\main\xiaozhi-server\plugins_func\functions\face_recognition_py\test_images\test_image_01.jpg" # 用于添加
-    USER_SPECIFIED_TEST_IMAGE_PATH_RECOGNIZE = r"F:\xiaozhi-esp32-server-1\main\xiaozhi-server\plugins_func\functions\face_recognition_py\test_images\test_image_02.jpg" # 用于识别
-
-    # 1. 测试添加人脸
-    test_person_name = "ServiceTestPersonViaHttp"
-    if os.path.exists(USER_SPECIFIED_TEST_IMAGE_PATH_ADD):
-        logging.info(f"\n--- 测试添加人脸 (通过HTTP): {test_person_name} using {USER_SPECIFIED_TEST_IMAGE_PATH_ADD} ---")
-        add_response = add_face_for_recognition(mock_conn, USER_SPECIFIED_TEST_IMAGE_PATH_ADD, test_person_name)
-        logging.info(f"添加人脸 ActionResponse: action={add_response.action}, result='{add_response.result}', response='{add_response.response}'")
-    else:
-        logging.warning(f"用于添加的测试图片 {USER_SPECIFIED_TEST_IMAGE_PATH_ADD} 不存在，跳过添加测试。")
-
-    # 2. 测试识别人脸 (使用默认测试图片 - 函数内部逻辑)
-    # logging.info(f"\n--- 测试识别人脸 (使用默认内置图片路径，通过HTTP) ---")
-    # rec_response_default = recognize_face_in_image(mock_conn) # No path provided
-    # logging.info(f"默认图片识别 ActionResponse: action={rec_response_default.action}, result='{rec_response_default.result}', response='{rec_response_default.response}'")
-    
-    # 3. 测试识别人脸 (使用用户指定的图片)
-    if os.path.exists(USER_SPECIFIED_TEST_IMAGE_PATH_RECOGNIZE):
-        logging.info(f"\n--- 测试识别人脸 (使用用户指定图片 {USER_SPECIFIED_TEST_IMAGE_PATH_RECOGNIZE}，通过HTTP) ---")
-        rec_response_user_img = recognize_face_in_image(mock_conn, USER_SPECIFIED_TEST_IMAGE_PATH_RECOGNIZE)
-        logging.info(f"用户指定图片识别 ActionResponse: action={rec_response_user_img.action}, result='{rec_response_user_img.result}', response='{rec_response_user_img.response}'")
-    else:
-        logging.warning(f"用于识别的测试图片 {USER_SPECIFIED_TEST_IMAGE_PATH_RECOGNIZE} 不存在，跳过此项识别测试。")
-
-    # 4. 测试识别不存在的图片 (本地文件检查会先失败)
-    logging.info(f"\n--- 测试识别人脸 (使用不存在的图片路径) ---")
-    rec_response_nonexist = recognize_face_in_image(mock_conn, "non_existent_image.jpg")
-    logging.info(f"识别不存在图片 ActionResponse: action={rec_response_nonexist.action}, result='{rec_response_nonexist.result}', response='{rec_response_nonexist.response}'")
-
-    # 清理逻辑不再适用，因为数据库和文件在微服务中管理
-    # 确保 pillow 相关代码被移除或注释掉，因为它用于生成本地测试图片，现在依赖微服务
-    # try:
-    #     from PIL import Image, ImageDraw ...
-    # except ImportError:
-    #     ...

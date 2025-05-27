@@ -171,14 +171,12 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
 
         processed_faces_count = 0
         for i, df_region in enumerate(dfs):
-            if df_region.empty:
+            if df_region.empty or len(df_region) == 0:
                 if enforce_detection: # 只有在检测模式下，区分"未检测到脸"和"检测到但无匹配"才有意义
-                    face_coords_info = ""
-                    if 'source_x' in df_region.columns : # 早期版本可能没有这些列如果find直接返回空df
-                         face_coords_info = f"(区域: x={df_region.iloc[0].get('source_x', '?')}, y={df_region.iloc[0].get('source_y', '?')}, w={df_region.iloc[0].get('source_w', '?')}, h={df_region.iloc[0].get('source_h', '?')})"
-                    print(f"图片中的第 {i+1} 张检测到的人脸 {face_coords_info} 在数据库中没有找到匹配项。")
+                    # 对于空的DataFrame，我们无法获取人脸区域坐标信息
+                    print(f"图片中的第 {i+1} 张检测到的人脸区域为空或在数据库中没有找到匹配项。")
                 else: # 如果 enforce_detection is False, 意味着输入图片本身就是一张脸，但没匹配
-                    print(f"输入的人脸图片在数据库中没有找到匹配项。")
+                    print(f"输入的人脸图片在数据库中没有找到匹配项 (df_region 为空或无行)。")
                 continue
             
             processed_faces_count += 1
