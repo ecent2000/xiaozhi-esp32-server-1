@@ -36,10 +36,6 @@ DEEPFACE_MICROSERVICE_URL = "http://localhost:8001" # 微服务地址，后续�
 ADD_FACE_ENDPOINT = f"{DEEPFACE_MICROSERVICE_URL}/add_face/"
 IDENTIFY_FACE_ENDPOINT = f"{DEEPFACE_MICROSERVICE_URL}/identify_face/"
 
-# 定义默认测试图片路径
-# DEFAULT_RECOGNITION_IMAGE_PATH 不再是此流程的主要输入
-# DEFAULT_RECOGNITION_IMAGE_PATH = r"F:\\xiaozhi-esp32-server-1\\main\\xiaozhi-server\\plugins_func\\functions\\test_images\\test_image_01.jpg"
-
 recognize_face_desc = {
     "type": "function",
     "function": {
@@ -54,7 +50,7 @@ recognize_face_desc = {
 }
 
 @register_function("recognize_face_in_image", recognize_face_desc, ToolType.SYSTEM_CTL)
-def recognize_face_in_image(conn, image_path: str = None) -> ActionResponse: # image_path 参数在此流程中通常不被使用
+def recognize_face_in_image(conn) -> ActionResponse | None: # image_path 参数在此流程中通常不被使用
     logging.info("recognize_face_in_image: 启动人脸识别流程，请求客户端提供照片。")
 
     # 1. 构建发送给客户端的指令
@@ -87,13 +83,10 @@ def recognize_face_in_image(conn, image_path: str = None) -> ActionResponse: # i
         logging.error("recognize_face_in_image: conn.websocket 或 conn.loop 不可用，无法发送消息。")
         return ActionResponse(action=Action.REQLLM, result="系统内部错误，无法发送指令给客户端。", response=None)
 
-    # 3. 返回 ActionResponse
-    # user_facing_response = "我已经向您的App发送了拍照请求，请您按照App上的提示完成人脸识别操作。" # 根据用户要求，考虑移除或修改
-    llm_facing_result = f"已向客户端发送拍照指令: {iot_message_data['commands']}。" # 修改 llm_facing_result，使其更简洁
-    
-    logging.info(f"recognize_face_in_image: 流程已启动，返回 ActionResponse。LLM result: '{llm_facing_result}'")
-    
-    return ActionResponse(action=Action.REQLLM, result="", response=None)
+    # 3. 成功发送指令后，不再返回 ActionResponse
+    llm_facing_result = f"已向客户端发送拍照指令: {iot_message_data['commands']}。"
+    logging.info(f"recognize_face_in_image: 流程已启动。LLM result: '{llm_facing_result}'")
+    return None
 
 
 def _save_uploaded_image(image_data_base64: str, conn_session_id: str) -> str | None:
@@ -170,79 +163,49 @@ def process_uploaded_face_image(conn, image_data_base64: str) -> ActionResponse:
     temp_image_path = _save_uploaded_image(image_data_base64, conn.session_id)
 
     if not temp_image_path:
-        return ActionResponse(action=Action.REQLLM, result="处理上传图片失败，无法正确保存图片数据。", response=None)
+        return ActionResponse(action=Action.REQLLM, result="处理上传图片失败，图片无法保存。", response=None)
 
     logging.info(f"开始调用人脸识别微服务 (客户端图片): 图片='{temp_image_path}'")
     
     try:
         with open(temp_image_path, 'rb') as img_file:
-            files = {'image': (os.path.basename(temp_image_path), img_file, 'image/jpeg')} # 假设jpeg
-            data = {'enforce_detection': True} # 和原逻辑一致
+            files = {'image': (os.path.basename(temp_image_path), img_file, 'image/jpeg')} 
+            data = {'enforce_detection': True} 
             
-            # 使用 IDENTIFY_FACE_ENDPOINT
             response = requests.post(IDENTIFY_FACE_ENDPOINT, files=files, data=data, timeout=60)
             response.raise_for_status()
             response_data = response.json()
 
-        if response_data and "results" in response_data:
-            identification_output = response_data["results"]
-            if isinstance(identification_output, dict) and "error" in identification_output:
-                error_msg = identification_output['error']
-                logging.error(f"人脸识别微服务报告错误 (客户端图片): {error_msg}")
-                return ActionResponse(action=Action.REQLLM, result=f"人脸识别失败: {error_msg}", response=None)
-            elif isinstance(identification_output, list):
-                if not identification_output: 
-                    result_summary = f"在您提供的照片中未检测到有效人脸，或者检测到的人脸在我们的数据库中没有匹配项。"
-                    logging.info(f"识别人脸 (客户端图片): {result_summary}")
-                    return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
-                
-                num_faces = len(identification_output)
-                confirmed_persons = []
-                for face_data in identification_output:
-                    # "identity" field in deepface is usually a list of paths, we need "identified_person_name" from our wrapper
-                    if face_data.get("confirmed") and face_data.get("identified_person_name") != "未知身份":
-                        confirmed_persons.append(face_data["identified_person_name"])
-                
-                if confirmed_persons:
-                    unique_confirmed_persons = list(set(confirmed_persons))
-                    result_summary = f"根据您提供的照片，识别出 {len(unique_confirmed_persons)} 位已确认身份的人: {', '.join(unique_confirmed_persons)}。"
-                    if len(unique_confirmed_persons) < num_faces:
-                         result_summary += f" (照片中共检测到 {num_faces} 张人脸区域，部分未确认身份或为同一人多次出现)"
-                else:
-                    result_summary = f"在您提供的照片中检测到 {num_faces} 张人脸区域，但未能确认任何已在我们数据库中的身份。"
-                logging.info(f"人脸识别成功 (客户端图片): {result_summary}")
-                return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
-            else: 
-                raw_output_str = f"Type: {type(identification_output)}, Value: {str(identification_output)[:200]}"
-                logging.error(f"人脸识别微服务返回了意外的 'results' 格式 (客户端图片): {raw_output_str}")
-                return ActionResponse(action=Action.REQLLM, result=f"人脸识别服务返回了意外的数据格式。", response=None)
-        elif response_data and "error" in response_data: # FastAPI detail field
-            error_msg = response_data.get('detail', response_data['error'])
-            logging.error(f"人脸识别微服务调用失败 (客户端图片, 来自响应体): {error_msg}")
-            return ActionResponse(action=Action.REQLLM, result=f"人脸识别失败: {error_msg}", response=None)
+        identification_output = response_data["results"]
+        
+        if not identification_output: 
+            result_summary = f"在您提供的照片中未检测到有效人脸，或者检测到的人脸在我们的数据库中没有匹配项。"
+            logging.info(f"识别人脸 (客户端图片): {result_summary}")
+            return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
+        
+        num_faces = len(identification_output)
+        confirmed_persons = []
+        for face_data in identification_output:
+            if face_data.get("confirmed") and face_data.get("identified_person_name") != "未知身份":
+                confirmed_persons.append(face_data["identified_person_name"])
+        
+        if confirmed_persons:
+            unique_confirmed_persons = list(set(confirmed_persons))
+            result_summary = f"根据您提供的照片，识别出 {len(unique_confirmed_persons)} 位已确认身份的人: {', '.join(unique_confirmed_persons)}。"
+            if len(unique_confirmed_persons) < num_faces:
+                 result_summary += f" (照片中共检测到 {num_faces} 张人脸区域，部分未确认身份或为同一人多次出现)"
         else:
-            logging.error(f"人脸识别微服务返回未知格式响应 (客户端图片): HTTP {response.status_code}, Body: {response.text[:200]}")
-            return ActionResponse(action=Action.REQLLM, result="人脸识别服务通讯或响应格式错误。", response=None)
+            result_summary = f"在您提供的照片中检测到 {num_faces} 张人脸区域，但未能确认任何已在我们数据库中的身份。"
+        
+        logging.info(f"人脸识别成功 (客户端图片): {result_summary}")
+        return ActionResponse(action=Action.REQLLM, result=result_summary, response=None)
 
-    except requests.exceptions.RequestException as e:
-        logging.error(f"调用人脸识别微服务失败 (客户端图片): {e}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result=f"无法连接到人脸识别服务: {str(e).splitlines()[-1]}", response=None)
-    except json.JSONDecodeError as e:
-        logging.error(f"解析人脸识别微服务响应失败 (客户端图片): {e}. Last response text (if any): {response.text[:200] if 'response' in locals() else 'N/A'}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result="解析人脸识别服务响应时出错。", response=None)
     except Exception as e:
-        logging.error(f"处理人脸识别时发生未知错误 (客户端图片): {e}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result=f"处理人脸识别时发生意外错误: {str(e)}", response=None)
+        # 捕获所有类型的异常，包括requests.exceptions.*, json.JSONDecodeError, KeyError, TypeError等
+        logging.error(f"处理人脸识别过程中发生统一捕获的错误 (客户端图片): {e}", exc_info=True)
+        return ActionResponse(action=Action.REQLLM, result="处理人脸识别过程中发生错误，请检查服务日志获取详情。", response=None)
     finally:
         if temp_image_path and os.path.exists(temp_image_path):
-            # 如果需要永久保留图片，注释掉下面的os.remove和相关的日志
-            # try:
-            #     os.remove(temp_image_path)
-            #     logging.info(f"已清理临时图片文件: {temp_image_path}")
-            # except Exception as e_remove:
-            #     logging.error(f"清理临时图片文件失败 '{temp_image_path}': {e_remove})
-            
-            # 如果选择保留，可以记录文件已保留
             logging.info(f"图片文件已保留在: {temp_image_path}")
         elif temp_image_path: # 文件未成功保存但路径已生成
             logging.info(f"临时图片路径已生成但文件不存在: {temp_image_path}")
@@ -256,36 +219,14 @@ add_face_desc = {
         "parameters": {
             "type": "object",
             "properties": {
-                "image_path": {
-                    "type": "string", 
-                    "description": "包含人脸的本地图片路径。例如 D:/images/photo.jpg 或 ./data/input/person.png"
-                },
-                "person_name": {
-                    "type": "string",
-                    "description": "图片中人物的姓名。这将用于在数据库中创建子文件夹。"
-                }
             },
-            "required": ["image_path", "person_name"]
+            "required": []
         }
     }
 }
 
 @register_function("add_face_for_recognition", add_face_desc, ToolType.SYSTEM_CTL)
-def add_face_for_recognition(conn, image_path: str, person_name: str) -> ActionResponse:
-    if not isinstance(image_path, str) or not image_path.strip():
-        return ActionResponse(action=Action.RESPONSE, result="参数错误", response="图片路径不能为空。")
-    if not isinstance(person_name, str) or not person_name.strip():
-        return ActionResponse(action=Action.RESPONSE, result="参数错误", response="人物姓名不能为空。")
-
-    if not os.path.isabs(image_path):
-        logging.info(f"提供的图片路径 '{image_path}' 是相对路径，将尝试直接使用。确保路径相对于服务运行位置正确。")
-
-    if not os.path.exists(image_path):
-        return ActionResponse(action=Action.RESPONSE, result="文件未找到", response=f"图片文件 '{os.path.basename(image_path)}' 未找到。")
-
-    # 数据库目录创建由微服务处理
-    logging.info(f"开始调用微服务添加人脸: 图片='{image_path}', 姓名='{person_name}'")
-    
+def add_face_for_recognition(image_path: str, person_name: str) -> ActionResponse:
     try:
         with open(image_path, 'rb') as img_file:
             files = {'image': (os.path.basename(image_path), img_file, 'image/jpeg')}
@@ -296,29 +237,21 @@ def add_face_for_recognition(conn, image_path: str, person_name: str) -> ActionR
             
             response_data = response.json()
 
-        # dm_add_face 的原始逻辑是直接操作文件系统并打印日志，微服务抽象了这一点
-        # 微服务的响应现在是主要依据
         if response_data and "message" in response_data:
             message = response_data["message"]
             logging.info(f"添加人脸微服务响应: {message}")
-            # 可以根据 message 内容判断是否真正成功，或者依赖 HTTP 状态码
-            # 假设 200 OK 并且有 message 就代表操作已提交给微服务
-            # 原来的 os.path.exists(destination_path) 检查现在不适用，因为文件在微服务那边
             return ActionResponse(action=Action.REQLLM, result=f"向微服务提交添加人脸请求成功: {message}", response=None)
-        elif response_data and "error" in response_data: # 例如微服务返回的业务逻辑错误
+        elif response_data and "error" in response_data: 
             error_msg = response_data.get('detail', response_data['error'])
             logging.warning(f"添加人脸微服务报告错误: {error_msg}")
             return ActionResponse(action=Action.REQLLM, result=f"添加人脸失败: {error_msg}", response=None)
         else:
             logging.error(f"添加人脸微服务返回未知格式响应: HTTP {response.status_code}, Body: {response.text[:200]}")
-            return ActionResponse(action=Action.REQLLM, result="添加人脸服务通讯或响应格式错误。", response=None)
+            return ActionResponse(action=Action.REQLLM, result="添加人脸服务响应格式不正确。", response=None)
 
-    except requests.exceptions.RequestException as e:
-        logging.error(f"调用添加人脸微服务失败: {e}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result=f"无法连接到人脸识别服务以添加人脸: {e}", response=None)
-    except json.JSONDecodeError as e:
-        logging.error(f"解析添加人脸微服务响应失败: {e}. Response text: {response.text[:200]}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result="解析添加人脸服务响应时出错。", response=None)
-    except Exception as e: # 包括 dm_add_face 可能抛出的 RuntimeError 等
+    except (requests.exceptions.RequestException, json.JSONDecodeError) as e:
+        logging.error(f"调用/解析添加人脸微服务响应失败: {e}", exc_info=True)
+        return ActionResponse(action=Action.REQLLM, result="添加人脸服务通讯失败，请检查服务是否正常运行。", response=None)
+    except Exception as e: 
         logging.error(f"添加人脸时发生未知错误: {e}", exc_info=True)
-        return ActionResponse(action=Action.REQLLM, result=f"添加人脸时发生意外错误: {str(e)}", response=None)
+        return ActionResponse(action=Action.REQLLM, result="添加人脸过程中发生未知内部错误。", response=None)
