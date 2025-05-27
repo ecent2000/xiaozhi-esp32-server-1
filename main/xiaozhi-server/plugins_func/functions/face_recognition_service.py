@@ -44,7 +44,7 @@ recognize_face_desc = {
     "type": "function",
     "function": {
         "name": "recognize_face_in_image",
-        "description": "启动人脸识别流程。系统将请求与小植连接的客户端App通过摄像头提供一张实时照片，然后使用该照片进行身份识别。",
+        "description": "启动完整的人脸识别流程，包括请求客户端App拍照并进行身份识别。",
         "parameters": {
             "type": "object",
             "properties": {}, # 无需外部参数来启动此流程
@@ -88,12 +88,12 @@ def recognize_face_in_image(conn, image_path: str = None) -> ActionResponse: # i
         return ActionResponse(action=Action.REQLLM, result="系统内部错误，无法发送指令给客户端。", response=None)
 
     # 3. 返回 ActionResponse
-    user_facing_response = "我已经向您的App发送了拍照请求，请您按照App上的提示完成人脸识别操作。" # 这个可以考虑是否需要，如果LLM会回复的话
-    llm_facing_result = f"已通知用户进行人脸识别操作。App端已发送指令: {iot_message_data['commands']}。等待用户通过App上传照片。"
+    # user_facing_response = "我已经向您的App发送了拍照请求，请您按照App上的提示完成人脸识别操作。" # 根据用户要求，考虑移除或修改
+    llm_facing_result = f"已向客户端发送拍照指令: {iot_message_data['commands']}。" # 修改 llm_facing_result，使其更简洁
     
     logging.info(f"recognize_face_in_image: 流程已启动，返回 ActionResponse。LLM result: '{llm_facing_result}'")
     
-    return ActionResponse(action=Action.REQLLM, result=llm_facing_result, response=None)
+    return ActionResponse(action=Action.REQLLM, result="", response=None)
 
 
 def _save_uploaded_image(image_data_base64: str, conn_session_id: str) -> str | None:
