@@ -64,10 +64,19 @@ async def add_face_endpoint(
 
     # FastAPI 的 UploadFile 需要保存到临时文件才能被 deepface 处理
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(image.filename)[1]) as tmp_image_file:
+        # 使用更清晰的临时文件名，包含person_name信息
+        file_extension = os.path.splitext(image.filename)[1] if image.filename else '.jpg'
+        if not file_extension:
+            file_extension = '.jpg'  # 默认使用jpg扩展名
+            
+        import time
+        timestamp = int(time.time())
+        temp_filename = f"{person_name}_{timestamp}{file_extension}"
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, prefix=f"{person_name}_") as tmp_image_file:
             shutil.copyfileobj(image.file, tmp_image_file)
             tmp_image_path = tmp_image_file.name
-        logger.info(f"临时图片已保存到: {tmp_image_path}")
+        logger.info(f"临时图片已保存到: {tmp_image_path} (原始文件名: {image.filename})")
 
         # 调用 deepface_manager 中的函数
         # 注意：deepface_manager.add_face_to_database 内部有打印和错误处理

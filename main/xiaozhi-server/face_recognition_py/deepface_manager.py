@@ -27,12 +27,6 @@ def add_face_to_database(image_path: str, person_name: str, database_path: str):
     if not person_name.strip():
         print("错误: 人物姓名不能为空。")
         return
-
-    # 替换或移除不适合作为文件夹名称的字符 (可选，但推荐)
-    # person_name_safe = "".join(c if c.isalnum() or c in [' ', '_', '-'] else '_' for c in person_name).strip()
-    # if not person_name_safe:
-    #     print(f"错误: 处理后的任务姓名 '{person_name}' 无效。")
-    #     return
     
     person_dir = os.path.join(database_path, person_name) # 使用原始 person_name
     
@@ -43,24 +37,21 @@ def add_face_to_database(image_path: str, person_name: str, database_path: str):
         return
 
     image_filename = os.path.basename(image_path)
-    destination_path = os.path.join(person_dir, image_filename)
+    # 生成更清晰的文件名，使用person_name和时间戳
+    timestamp = int(time.time())
+    file_extension = os.path.splitext(image_filename)[1] or '.jpg'
+    clean_filename = f"{person_name}_{timestamp}{file_extension}"
+    destination_path = os.path.join(person_dir, clean_filename)
 
     # 检查目标文件是否已存在
     if os.path.exists(destination_path):
         print(f"提示: 文件 '{destination_path}' 已存在。如果您想更新，请先删除旧文件或使用不同文件名。")
-        # 可以选择是否覆盖: shutil.copy(image_path, destination_path) 并打印覆盖信息
-        # 或者提示用户，此处选择不覆盖并返回
         return 
 
     try:
         shutil.copy(image_path, destination_path)
-        print(f"成功: 图像 '{image_filename}' 已添加至数据库，身份为 '{person_name}' (路径: {destination_path})。")
+        print(f"成功: 图像 '{clean_filename}' 已添加至数据库，身份为 '{person_name}' (路径: {destination_path})。")
 
-        # DeepFace.find() 在找不到预计算的特征文件 (如 representations_vgg-face.pkl) 或文件过时时，
-        # 会自动重新扫描数据库图片并计算特征。
-        # 为确保新添加的图片被立即用于识别，可以考虑删除旧的特征 .pkl 文件。
-        # 这会导致下次调用 find 时强制重新生成特征库，对于大型数据库可能耗时。
-        # 这是一个可选步骤，取决于具体需求。
         deleted_pkl = False
         for file_in_db in os.listdir(database_path):
             if file_in_db.startswith("representations_") and file_in_db.endswith(".pkl"):
@@ -274,103 +265,3 @@ def identify_faces_in_image(image_to_check_path: str, database_path: str,
         print(f"人脸识别过程中发生未知错误: {e}")
         traceback.print_exc()
         return {"error": f"人脸识别过程中发生未知错误: {e}", "details": str(e)}
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="DeepFace 人脸识别与数据库管理脚本。",
-        formatter_class=argparse.RawTextHelpFormatter # 更好地显示多行帮助信息
-    )
-    parser.add_argument(
-        "--db", 
-        type=str, 
-        default=DEFAULT_DB_PATH, 
-        help=f"""人脸数据库的根目录路径。
-默认为: "{DEFAULT_DB_PATH}" (在脚本同级目录下创建)。"""
-    )
-
-    # 子命令解析器
-    subparsers = parser.add_subparsers(dest="command", required=True, title="可用命令",
-                                       help="选择要执行的操作: 'add' 或 'identify'")
-
-    # --- 'add' 命令 ---
-    parser_add = subparsers.add_parser(
-        "add", 
-        help="向数据库中添加新的人脸图像。",
-        description="将一张图片复制到人脸数据库中，并以指定的人物姓名创建子文件夹进行归类。"
-    )
-    parser_add.add_argument(
-        "-i", "--image", 
-        type=str, 
-        required=True, 
-        help="待添加的人脸图像的本地文件路径。"
-    )
-    parser_add.add_argument(
-        "-n", "--name", 
-        type=str, 
-        required=True, 
-        help="图像中人物的姓名。这将作为数据库中存放该人物图片的子文件夹名称。"
-    )
-
-    # --- 'identify' 命令 ---
-    parser_identify = subparsers.add_parser(
-        "identify", 
-        help="在数据库中识别给定图像中的人脸。",
-        description="检测输入图像中的人脸，并与数据库中的已知人脸进行比对，输出识别结果。"
-    )
-    parser_identify.add_argument(
-        "-i", "--image", 
-        type=str, 
-        required=True, 
-        help="待识别的人脸图像的本地文件路径。"
-    )
-    parser_identify.add_argument(
-        "--model", 
-        type=str, 
-        default="VGG-Face", 
-        help="""使用的人脸识别模型。
-可选: "VGG-Face", "Facenet", "Facenet512", "OpenFace", "DeepFace", "DeepID", "ArcFace", "Dlib", "SFace".
-默认为: "VGG-Face"."""
-    )
-    parser_identify.add_argument(
-        "--metric", 
-        type=str, 
-        default="cosine", 
-        help="""用于计算相似度的距离度量。
-常用: "cosine", "euclidean", "euclidean_l2".
-默认为: "cosine"."""
-    )
-    parser_identify.add_argument(
-        "--no-detect", 
-        action="store_false", 
-        dest="enforce_detection", 
-        help="""禁用人脸检测步骤。
-如果使用此选项，脚本将假定输入图像本身已经是一张裁剪好的人脸图片。
-默认不启用此项 (即默认执行人脸检测)。"""
-    )
-    parser_identify.add_argument(
-        "--benchmark",
-        action="store_true",
-        help="显示性能测试信息，包括总耗时和每张人脸的处理时间。"
-    )
-    parser_identify.set_defaults(enforce_detection=True) # 默认强制执行人脸检测
-
-    args = parser.parse_args()
-
-    # 确保主数据库目录存在，如果不存在则创建
-    try:
-        os.makedirs(args.db, exist_ok=True)
-        # print(f"使用人脸数据库目录: {os.path.abspath(args.db)}")
-    except OSError as e:
-        print(f"错误: 无法创建或访问数据库目录 '{args.db}': {e}")
-        return
-
-    if args.command == "add":
-        print(f"\n执行操作: 添加人脸")
-        add_face_to_database(args.image, args.name, args.db)
-    elif args.command == "identify":
-        print(f"\n执行操作: 识别人脸")
-        identify_faces_in_image(args.image, args.db, args.model, args.metric, args.enforce_detection, args.benchmark)
-
-if __name__ == "__main__":
-    main() 
