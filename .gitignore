@@ -166,3 +166,6 @@ main/manager-web/.webpack_cache/
 main/xiaozhi-server/mysql
 uploadfile
 .vscode
+
+main/xiaozhi-server/face_recognition_py/dataset
+main/xiaozhi-server/face_recognition_py/test_images
