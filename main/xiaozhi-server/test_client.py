@@ -204,7 +204,8 @@ class XiaozhiTestClient:
             "session_id": session_id, 
             "type": "listen",
             "state": "detect",
-            "text": text
+            "text": text,
+            "source": "text"
         }
         try:
             await self.websocket.send(json.dumps(message))

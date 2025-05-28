@@ -10,16 +10,13 @@ import json
 import os
 import random
 import uuid
-import subprocess # 用于调用ffmpeg
+import subprocess
 import time
+import numpy as np
+from pydub import AudioSegment
 
 def generate_mac_address():
     """生成一个随机的MAC地址"""
-    # return "00:1A:2B:%02X:%02X:%02X" % (
-    #     random.randint(0, 255),
-    #     random.randint(0, 255),
-    #     random.randint(0, 255),
-    # )
     return "3E:8A:F1:6C:2D:B5" # 使用用户指定的MAC地址
 
 def check_ffmpeg():
@@ -29,35 +26,91 @@ def check_ffmpeg():
         print("✅ FFmpeg 已安装")
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
-        print("⚠️ FFmpeg 未安装或未在PATH中找到。音频将仅保存为 .opus 格式。")
+        print("⚠️ FFmpeg 未安装或未在PATH中找到。音频将仅保存为原始格式。")
         print("   请访问 https://ffmpeg.org/download.html 安装 FFmpeg 并将其添加到系统 PATH。")
         return False
 
-async def convert_opus_to_mp3(opus_path, mp3_path):
-    """使用ffmpeg将opus文件转换为mp3"""
+def check_opuslib():
+    """检查opuslib_next是否可用"""
+    try:
+        import opuslib_next
+        print("✅ opuslib_next 已安装")
+        return True
+    except ImportError:
+        print("⚠️ opuslib_next 未安装。请使用: pip install opuslib-next")
+        return False
+
+def opus_frames_to_wav(opus_frames_data, output_wav_path):
+    """将Opus帧数据转换为WAV文件"""
+    try:
+        import opuslib_next
+        
+        # 初始化Opus解码器（16kHz, 单声道）
+        decoder = opuslib_next.Decoder(16000, 1)
+        
+        # 解码所有Opus帧
+        decoded_samples = []
+        
+        for frame_data in opus_frames_data:
+            if len(frame_data) > 0:  # 跳过空帧
+                try:
+                    # 解码当前帧
+                    decoded_frame = decoder.decode(frame_data, 960)  # 60ms @ 16kHz = 960 samples
+                    decoded_samples.append(decoded_frame)
+                except Exception as e:
+                    print(f"⚠️ 跳过无效的Opus帧: {e}")
+                    continue
+        
+        if not decoded_samples:
+            print("❌ 没有有效的Opus帧数据")
+            return False
+        
+        # 合并所有解码的PCM数据
+        all_samples = b''.join(decoded_samples)
+        
+        # 转换为numpy数组
+        audio_array = np.frombuffer(all_samples, dtype=np.int16)
+        
+        # 使用pydub创建AudioSegment
+        audio_segment = AudioSegment(
+            audio_array.tobytes(),
+            frame_rate=16000,
+            sample_width=2,  # 16位 = 2字节
+            channels=1
+        )
+        
+        # 导出为WAV
+        audio_segment.export(output_wav_path, format="wav")
+        print(f"💾 已成功将Opus帧转换为WAV: {output_wav_path}")
+        return True
+        
+    except ImportError:
+        print("❌ opuslib_next未安装，无法解码Opus帧")
+        return False
+    except Exception as e:
+        print(f"❌ Opus解码失败: {e}")
+        return False
+
+async def convert_wav_to_mp3(wav_path, mp3_path):
+    """使用ffmpeg将WAV转换为MP3"""
     try:
         process = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-i", opus_path, "-acodec", "libmp3lame", "-q:a", "2", mp3_path,
+            "ffmpeg", "-y", "-i", wav_path, "-acodec", "libmp3lame", "-q:a", "2", mp3_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE
         )
         stdout, stderr = await process.communicate()
+        
         if process.returncode == 0:
-            print(f"💾 音频已成功转换为 MP3: {mp3_path}")
+            print(f"💾 WAV已成功转换为MP3: {mp3_path}")
             return True
         else:
-            print(f"❌ FFmpeg 转换失败 (返回码: {process.returncode}):")
-            if stdout:
-                print(f"   [FFmpeg STDOUT]:\n{stdout.decode(errors='ignore')}")
+            print(f"❌ WAV转MP3失败 (返回码: {process.returncode})")
             if stderr:
-                print(f"   [FFmpeg STDERR]:\n{stderr.decode(errors='ignore')}")
+                print(f"   [STDERR]: {stderr.decode(errors='ignore')[:200]}...")
             return False
-    except FileNotFoundError:
-        # ffmpeg 未找到的错误已在 check_ffmpeg 中处理，这里主要捕获其他可能的错误
-        print(f"❌ 执行 ffmpeg 失败。请确保 FFmpeg 已安装并配置在系统 PATH 中。")
-        return False
     except Exception as e:
-        print(f"❌ FFmpeg 转换过程中发生未知错误: {e}")
+        print(f"❌ WAV转MP3过程出错: {e}")
         return False
 
 async def compatible_test():
@@ -66,6 +119,7 @@ async def compatible_test():
     # 确保tmp目录存在
     os.makedirs("tmp", exist_ok=True)
     ffmpeg_available = check_ffmpeg()
+    opuslib_available = check_opuslib()
     
     device_id = generate_mac_address()
     client_id = str(uuid.uuid4())
@@ -121,7 +175,8 @@ async def compatible_test():
                 "session_id": session_id_for_test,
                 "type": "listen",
                 "state": "detect",
-                "text": text_to_send
+                "text": text_to_send,
+                "source": "text"
             }
             
             print(f"💬 发送消息: {text_to_send}")
@@ -129,19 +184,19 @@ async def compatible_test():
             
             print("\n⏳ 开始接收服务器回复...")
             
-            # 用于收集当前对话的所有opus数据
-            current_conversation_opus_data = bytearray()
+            # 收集Opus帧数据（bytes列表）
+            opus_frames = []
             message_count = 0
             tts_completed = False
             
             while not tts_completed:
                 try:
-                    message = await asyncio.wait_for(websocket.recv(), timeout=30)
+                    message = await asyncio.wait_for(websocket.recv(), timeout=45)  # 增加超时时间
                     message_count += 1
                     
                     if isinstance(message, bytes):
-                        print(f"🎵 [{message_count}] 收到 Opus 音频包: {len(message)} 字节")
-                        current_conversation_opus_data.extend(message) # 追加到缓冲区
+                        print(f"🎵 [{message_count}] 收到 Opus 音频帧: {len(message)} 字节")
+                        opus_frames.append(message)  # 保存为独立的帧
                         
                     else:
                         try:
@@ -172,30 +227,40 @@ async def compatible_test():
                     break
             
             # --- 对话结束后的处理 ---
-            if len(current_conversation_opus_data) > 0:
-                # 生成文件名
+            if len(opus_frames) > 0:
                 base_filename = f"conversation_{session_id_for_test}_{int(time.time())}"
-                merged_opus_path = os.path.join("tmp", f"{base_filename}.opus")
-                final_mp3_path = os.path.join("tmp", f"{base_filename}.mp3")
                 
-                print(f"\n🔊 合并当前对话的 Opus 数据 ({len(current_conversation_opus_data)} 字节)...")
-                with open(merged_opus_path, "wb") as f_opus:
-                    f_opus.write(current_conversation_opus_data)
-                print(f"💾 已保存合并的 Opus 文件: {merged_opus_path}")
+                print(f"\n🔊 处理音频数据 ({len(opus_frames)} 个Opus帧)...")
                 
-                if ffmpeg_available:
-                    print(f"🔄 尝试将 {merged_opus_path} 转换为 MP3...")
-                    conversion_success = await convert_opus_to_mp3(merged_opus_path, final_mp3_path)
-                    if conversion_success:
-                        try:
-                            os.remove(merged_opus_path) # 删除临时的opus文件
-                            print(f"🗑️ 已删除临时 Opus 文件: {merged_opus_path}")
-                        except OSError as e_remove:
-                            print(f"⚠️ 无法删除临时 Opus 文件 {merged_opus_path}: {e_remove}")
+                if opuslib_available:
+                    # 方法1: 使用opuslib解码Opus帧
+                    wav_path = os.path.join("tmp", f"{base_filename}.wav")
+                    if opus_frames_to_wav(opus_frames, wav_path):
+                        # WAV转换成功
+                        if ffmpeg_available:
+                            # 转换为MP3
+                            mp3_path = os.path.join("tmp", f"{base_filename}.mp3")
+                            if await convert_wav_to_mp3(wav_path, mp3_path):
+                                # MP3转换成功，删除临时WAV
+                                try:
+                                    os.remove(wav_path)
+                                    print(f"🗑️ 已删除临时WAV文件: {wav_path}")
+                                except OSError:
+                                    pass
+                            else:
+                                print(f"💔 MP3转换失败，保留WAV文件: {wav_path}")
+                        else:
+                            print(f"ℹ️ FFmpeg不可用，仅保存WAV文件: {wav_path}")
                     else:
-                        print(f"💔 MP3 转换失败。保留 Opus 文件: {merged_opus_path}")
+                        print("💔 Opus解码失败")
                 else:
-                    print(f"ℹ️ FFmpeg 不可用，仅保存为 Opus 文件: {merged_opus_path}")
+                    # 方法2: 保存原始数据作为后备
+                    raw_path = os.path.join("tmp", f"{base_filename}_raw.dat")
+                    with open(raw_path, "wb") as f:
+                        for frame in opus_frames:
+                            f.write(frame)
+                    print(f"💾 已保存原始Opus帧数据: {raw_path}")
+                    print("ℹ️ 安装 opuslib-next 以启用音频解码功能")
             else:
                 print("🤷 当前对话未收到任何音频数据。")
                 
@@ -216,7 +281,7 @@ async def compatible_test():
 if __name__ == "__main__":
     print("xiaozhi-server 兼容性测试客户端")
     print("=" * 50)
-    print("将合并每个对话的音频并尝试转换为MP3 (如果FFmpeg可用)")
+    print("将合并每个对话的音频并转换为MP3")
     print("使用固定MAC地址: 3E:8A:F1:6C:2D:B5")
     print("=" * 50)
     
