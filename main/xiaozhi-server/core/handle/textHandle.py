@@ -94,17 +94,44 @@ async def handleTextMessage(conn, message):
                     conn.logger.bind(tag=TAG).info(f"人脸注册服务返回: action={action_response.action}, result='{action_response.result}', response='{action_response.response}'")
                     
                     if action_response.action == Action.RESPONSE:
-                        text_for_llm = action_response.response or f"已尝试为 {person_name} 注册人脸。"
+                        # 人脸注册成功，直接向客户端发送success响应
+                        success_message = action_response.response or f"已成功为 {person_name} 注册人脸。"
+                        await conn.websocket.send(json.dumps({
+                            "type": "face_registration",
+                            "success": True,
+                            "message": success_message,
+                            "person_name": person_name
+                        }))
+                        return  # 直接返回，不继续处理
                     elif action_response.action == Action.ERROR:
+                        # 人脸注册失败，向客户端发送error响应
                         error_detail = action_response.result or "未知详情"
-                        text_for_llm = f"抱歉，为 {person_name} 注册人脸时发生错误：{error_detail}"
+                        await conn.websocket.send(json.dumps({
+                            "type": "face_registration",
+                            "success": False,
+                            "message": f"抱歉，为 {person_name} 注册人脸时发生错误：{error_detail}",
+                            "person_name": person_name
+                        }))
+                        return  # 直接返回，不继续处理
                     else: # Handles any unexpected action type
                         conn.logger.bind(tag=TAG).error(f"未知或未处理的人脸注册 Action: {action_response.action}")
-                        text_for_llm = f"为 {person_name} 进行人脸注册操作已完成，但返回了意外的状态。"
+                        await conn.websocket.send(json.dumps({
+                            "type": "face_registration",
+                            "success": False,
+                            "message": f"为 {person_name} 进行人脸注册操作已完成，但返回了意外的状态。",
+                            "person_name": person_name
+                        }))
+                        return  # 直接返回，不继续处理
 
                 except Exception as e:
                     conn.logger.bind(tag=TAG).error(f"调用或处理人脸注册服务时发生异常: {e}", exc_info=True)
-                    text_for_llm = f"抱歉，尝试为 {person_name} 注册人脸时系统遇到内部错误。"
+                    await conn.websocket.send(json.dumps({
+                        "type": "face_registration",
+                        "success": False,
+                        "message": f"抱歉，尝试为 {person_name} 注册人脸时系统遇到内部错误。",
+                        "person_name": person_name
+                    }))
+                    return  # 直接返回，不继续处理
 
             elif image_data_base64:
                 # Only image_data is present, so perform face recognition
