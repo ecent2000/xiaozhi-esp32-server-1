@@ -10,6 +10,7 @@ import asyncio
 
 # Added imports
 from plugins_func.functions.face_recognition_service import process_uploaded_face_image, enroll_new_face_via_service
+from plugins_func.functions.image_vision_analysis import call_qwen_vision_api
 from plugins_func.register import Action
 
 TAG = __name__
@@ -76,11 +77,47 @@ async def handleTextMessage(conn, message):
             # Logic for handling iot messages with image_data and potentially person_name
             image_data_base64 = msg_json.get("image_data")
             person_name = msg_json.get("person_name")
+            vision_image_data = msg_json.get("vision_image_data")
 
             action_response = None
             text_for_llm = None
 
-            if person_name and image_data_base64:
+            # 处理视觉图片分析请求
+            if vision_image_data:
+                conn.logger.bind(tag=TAG).info("收到包含 vision_image_data 的 IoT 消息，准备进行视觉分析。")
+                try:
+                    # 预处理base64数据，移除可能的头部信息
+                    processed_image_data = vision_image_data
+                    if ',' in vision_image_data:
+                        # 如果包含数据URI头部，移除它
+                        header, processed_image_data = vision_image_data.split(',', 1)
+                        conn.logger.bind(tag=TAG).info(f"检测到base64头部: {header}")
+                    
+                    # 验证base64数据不为空
+                    if not processed_image_data.strip():
+                        conn.logger.bind(tag=TAG).error("Base64图片数据为空")
+                        text_for_llm = "抱歉，图片数据为空，无法进行视觉分析。"
+                    else:
+                        # 调用视觉分析API
+                        analysis_result = await conn.loop.run_in_executor(
+                            conn.executor,
+                            call_qwen_vision_api,
+                            processed_image_data,
+                            "详细描述这张图片的内容"
+                        )
+                        
+                        if analysis_result:
+                            text_for_llm = f"我已完成对您发送图片的视觉分析，以下是分析结果：\n\n{analysis_result}\n\n请根据以上分析结果为用户提供有用的信息和见解。"
+                            conn.logger.bind(tag=TAG).info("视觉分析完成，准备传递给大模型")
+                        else:
+                            text_for_llm = "抱歉，图片视觉分析失败，请检查图片格式或网络连接。"
+                            conn.logger.bind(tag=TAG).error("视觉分析失败")
+                        
+                except Exception as e:
+                    conn.logger.bind(tag=TAG).error(f"视觉分析过程中发生异常: {e}", exc_info=True)
+                    text_for_llm = "抱歉，处理图片视觉分析时发生了内部错误。"
+
+            elif person_name and image_data_base64:
                 # Both person_name and image_data are present, so enroll the face
                 conn.logger.bind(tag=TAG).info(f"收到包含 person_name ('{person_name}') 和 image_data 的 IoT 消息，准备进行人脸注册。")
                 try:
