@@ -95,7 +95,6 @@ def call_qwen_vision_api(image_base64, prompt):
         logger.bind(tag=TAG).error(f"调用通义千问API失败: {e}")
         return None
 
-
 @register_function("image_vision_analysis", IMAGE_VISION_ANALYSIS_FUNCTION_DESC, ToolType.SYSTEM_CTL)
 def image_vision_analysis(conn, prompt: str = "详细描述这张图片的内容"):
     """触发客户端进行图片视觉分析"""
