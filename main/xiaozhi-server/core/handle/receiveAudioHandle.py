@@ -54,6 +54,9 @@ async def handleAudioMessage(conn, audio):
 
 
 async def startToChat(conn, text):
+    # 重置客户端中断状态，确保新的对话不受之前的中断状态影响
+    conn.client_abort = False
+    
     if conn.need_bind:
         await check_bind_device(conn)
         return
@@ -99,7 +102,7 @@ async def no_voice_close_connect(conn):
             conn.client_abort = False
             conn.asr_server_receive = False
             prompt = (
-                "请你以“时间过得真快”未来头，用富有感情、依依不舍的话来结束这场对话吧。"
+                "请你以\"时间过得真快\"为开头，用富有感情、依依不舍的话来结束这场对话吧。"
             )
             await startToChat(conn, prompt)
 
