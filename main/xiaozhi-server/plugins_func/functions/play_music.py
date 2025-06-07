@@ -4,6 +4,7 @@ import re
 import time
 import random
 import asyncio
+import json
 import difflib
 import traceback
 from pathlib import Path
@@ -194,18 +195,16 @@ async def play_local_music(conn, specific_file=None):
     """播放本地音乐文件"""
     try:
         if not os.path.exists(MUSIC_CACHE["music_dir"]):
-            conn.logger.bind(tag=TAG).error(
-                f"音乐目录不存在: " + MUSIC_CACHE["music_dir"]
-            )
+            conn.logger.bind(tag=TAG).error(f"音乐目录不存在: {MUSIC_CACHE['music_dir']}")
             return
 
-        # 确保路径正确性
+        # 1. 选择音乐文件
         if specific_file:
             selected_music = specific_file
             music_path = os.path.join(MUSIC_CACHE["music_dir"], specific_file)
         else:
             if not MUSIC_CACHE["music_files"]:
-                conn.logger.bind(tag=TAG).error("未找到MP3音乐文件")
+                conn.logger.bind(tag=TAG).error("未找到任何音乐文件")
                 return
             selected_music = random.choice(MUSIC_CACHE["music_files"])
             music_path = os.path.join(MUSIC_CACHE["music_dir"], selected_music)
@@ -213,6 +212,40 @@ async def play_local_music(conn, specific_file=None):
         if not os.path.exists(music_path):
             conn.logger.bind(tag=TAG).error(f"选定的音乐文件不存在: {music_path}")
             return
+            
+        # 2. 提前处理音乐文件获取时长和Opus数据
+        opus_packets_song = None
+        duration = 0
+        if music_path.endswith(".p3"):
+            opus_packets_song, duration = p3.decode_opus_from_file(music_path)
+        else:
+            opus_packets_song, duration = conn.tts.audio_to_opus_data(music_path)
+
+        if not opus_packets_song:
+            conn.logger.bind(tag=TAG).error(f"音乐文件转换Opus失败: {music_path}")
+            # Optional: send TTS error message to user
+            return
+
+        # 3. 发送包含时长的LLM消息
+        session_id = conn.session_id
+        song_name_for_client = os.path.splitext(selected_music)[0]
+        llm_message_data = {
+            "type": "llm",
+            "text": "🎵",
+            "emotion": "happy",
+            "session_id": session_id,
+            "motion_data": {
+                "motion": "播放音乐",
+                "song_name": song_name_for_client,
+                "expression": "happy",
+                "duration": duration,
+            }
+        }
+        message_json = json.dumps(llm_message_data, ensure_ascii=False)
+        conn.logger.bind(tag=TAG).info(f"发送播放音乐LLM消息到客户端: {message_json}")
+        await conn.websocket.send(message_json)
+        
+        # 4. 生成并播放引导语
         text = _get_random_play_prompt(selected_music)
         await send_stt_message(conn, text)
         conn.dialogue.put(Message(role="assistant", content=text))
@@ -221,20 +254,16 @@ async def play_local_music(conn, specific_file=None):
 
         tts_file = await asyncio.to_thread(conn.tts.to_tts, text)
         if tts_file is not None and os.path.exists(tts_file):
-            conn.tts_last_text_index = 1
-            opus_packets, _ = conn.tts.audio_to_opus_data(tts_file)
-            # 添加第四个元素 None (motion_for_this_audio)
-            conn.audio_play_queue.put((opus_packets, None, 0, None))
+            opus_packets_intro, _ = conn.tts.audio_to_opus_data(tts_file)
+            if opus_packets_intro:
+                conn.audio_play_queue.put((opus_packets_intro, None, 0, None))
+                conn.tts_last_text_index = 1
             os.remove(tts_file)
 
+        # 5. 将音乐Opus数据放入播放队列
         conn.llm_finish_task = True
-
-        if music_path.endswith(".p3"):
-            opus_packets, _ = p3.decode_opus_from_file(music_path)
-        else:
-            opus_packets, _ = conn.tts.audio_to_opus_data(music_path)
-        # 添加第四个元素 None (motion_for_this_audio)
-        conn.audio_play_queue.put((opus_packets, None, conn.tts_last_text_index, None))
+        conn.audio_play_queue.put((opus_packets_song, None, conn.tts_last_text_index, None))
+        conn.logger.bind(tag=TAG).info(f"已将歌曲《{selected_music}》的Opus数据放入播放队列")
 
     except Exception as e:
         conn.logger.bind(tag=TAG).error(f"播放音乐失败: {str(e)}")
